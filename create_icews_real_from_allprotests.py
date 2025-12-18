@@ -1,0 +1,126 @@
+import os
+import pandas as pd
+import numpy as np
+
+
+# ========= 你原始的 ICEWS 文件路径（不要改） =========
+RAW_CSV = "./data/ICEWS-master/Data/2010_2011_AllProtests.csv"
+
+# ========= 输出路径：我们要生成的“标准事件文件” =========
+OUT_CSV = "./data/events/icews_real.csv"
+
+
+def main():
+    print("[INFO] Loading raw ICEWS file:", RAW_CSV)
+    if not os.path.exists(RAW_CSV):
+        raise FileNotFoundError(f"Raw file not found: {RAW_CSV}")
+
+    # 读取原始 CSV（自动识别编码）
+    df = pd.read_csv(RAW_CSV)
+
+    print("[INFO] Raw columns:")
+    print(list(df.columns))
+
+    # -----------------------------
+    # 1. 选择一个“时间列” → 转成连续时间
+    # -----------------------------
+    # 尝试找包含 "date" 的列
+    date_cols = [c for c in df.columns if "date" in c.lower()]
+    if date_cols:
+        date_col = date_cols[0]
+        print(f"[INFO] Use '{date_col}' as date column.")
+        df = df.dropna(subset=[date_col])
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.dropna(subset=[date_col])
+        df = df.sort_values(date_col)
+
+        t0 = df[date_col].min()
+        # 用 “从最早日期开始经过的天数” 作为 time
+        df["time"] = (df[date_col] - t0).dt.total_seconds() / 86400.0
+    else:
+        print("[WARN] No date-like column found, use row index as time.")
+        df = df.reset_index(drop=True)
+        df["time"] = df.index.astype(float)
+
+    # -----------------------------
+    # 2. 选择 src / dst / country / event_type 列（尽量自动匹配）
+    # -----------------------------
+    cols_lower = [c.lower() for c in df.columns]
+
+    def pick_col(candidates):
+        for name in df.columns:
+            low = name.lower()
+            if any(key in low for key in candidates):
+                return name
+        return None
+
+    src_col = pick_col(["source", "actor1", "sourceactor"])
+    dst_col = pick_col(["target", "actor2", "targetactor"])
+    country_col = pick_col(["country"])
+    type_col = pick_col(["event", "protest", "cameo"])
+
+    print("[INFO] Auto-matched columns:")
+    print("  src_col     =", src_col)
+    print("  dst_col     =", dst_col)
+    print("  country_col =", country_col)
+    print("  type_col    =", type_col)
+
+    # -----------------------------
+    # 3. 构造标准输出 DataFrame
+    #    列名固定：event_id,time,src,dst,country,event_type,label
+    # -----------------------------
+    out = pd.DataFrame()
+    out["event_id"] = np.arange(len(df), dtype=int)
+    out["time"] = df["time"]
+
+    if src_col is not None:
+        out["src"] = df[src_col].astype(str)
+    else:
+        out["src"] = "UNK"
+
+    if dst_col is not None:
+        out["dst"] = df[dst_col].astype(str)
+    else:
+        out["dst"] = "UNK"
+
+    if country_col is not None:
+        out["country"] = df[country_col].astype(str)
+    else:
+        out["country"] = "UNK"
+
+    # ---- FIX: prefer real type codes (CAMEO) over Event_ID ----
+    prefer = None
+    for cand in ["CAMEO_Code_Modified", "CAMEO_Code", "CAMEOCode", "EventCode", "RootCode", "QuadClass"]:
+        if cand in df.columns:
+            prefer = cand
+            break
+
+    if prefer is not None:
+        out["event_type"] = df[prefer].astype(str)
+    elif type_col is not None:
+        out["event_type"] = df[type_col].astype(str)
+    else:
+        out["event_type"] = "protest"
+    # ----------------------------------------------------------
+    # 现在先简单：全部标记为 1（后续可以加更精细的规则）
+    out["label"] = 1
+
+    # -----------------------------
+    # 4. 去掉明显的缺失/异常值（可选，先简单一点）
+    # -----------------------------
+    out = out.dropna(subset=["time"])
+    out = out.sort_values("time").reset_index(drop=True)
+
+    # -----------------------------
+    # 5. 保存到目标 CSV
+    # -----------------------------
+    os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
+    out.to_csv(OUT_CSV, index=False, encoding="utf-8")
+
+    print("[INFO] Saved cleaned ICEWS events to:", OUT_CSV)
+    print("[INFO] Head of cleaned data:")
+    print(out.head())
+
+
+if __name__ == "__main__":
+    main()
