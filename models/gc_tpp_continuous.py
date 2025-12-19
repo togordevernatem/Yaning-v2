@@ -1,11 +1,47 @@
+"""
+GC-TPP Continuous core model (Stage-5 / Stage-5+ baseline)
+
+本文件实现论文中的 Core 模型：
+- 使用 GConvGRU 对时序图快照进行编码，得到图级表示 g_t；
+- 使用 GRU 对历史时间间隔 Δt 进行编码，得到时间表示 h_t；
+- 将 [g_t; h_t] 输入 MLP，输出 LogNormal 分布参数 [mu, log_sigma]，
+  以对数正态分布建模下一次事件时间间隔 Δt 的条件分布。
+
+训练与评估部分对应 Stage-5:
+- 支持 toy / icews_real / icews_real_topk500 等 data_mode；
+- 采用 Protocol-B Mixed split (在 data/dataset_toy.py 中实现)；
+- 显式区分 Test-全体 / Test-Seen / Test-OOD 的 NLL / RMSE / MAE；
+- 将训练 & 验证曲线以及测试指标保存到 logs/*.npz，供后续 Stage-6/10/11 分析。
+"""
+
 import os
 import math
 import numpy as np
 import torch
 import torch.nn as nn
+import random  # 为 set_seed 服务
 
 from torch_geometric_temporal.nn.recurrent import GConvGRU
 from data.dataset_toy import GC_TPP_Dataset
+
+
+def set_seed(seed: int = 0):
+    """
+    为 Python / NumPy / PyTorch 统一设置随机种子，便于实验可复现。
+
+    注意：
+    - 这只能保证“同一份代码 + 同一硬件 + 同一依赖版本”下的结果可重复；
+    - 如果需要完全确定性的 CuDNN 行为，可以取消下面两行注释，
+      但这通常会降低训练速度。
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        # 完全确定性（可选）：
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
 
 
 # ===========================
@@ -13,8 +49,12 @@ from data.dataset_toy import GC_TPP_Dataset
 # ===========================
 class EarlyStopping:
     """
-    基于验证集 NLL 的早停，不依赖 RMSE/MAE，所以 RMSE/MAE 即使换成 log 空间也不影响训练逻辑。
+    基于验证集 NLL 的早停工具。
+
+    注意：这里只使用 NLL 作为 early stopping 的依据，
+    RMSE/MAE 虽然在 log(Δt) 空间计算，但不参与 early stopping 判定。
     """
+
     def __init__(self, patience: int = 3, min_delta: float = 0.0):
         self.patience = patience
         self.min_delta = min_delta
@@ -22,6 +62,9 @@ class EarlyStopping:
         self.num_bad_epochs = 0
 
     def step(self, current: float) -> bool:
+        """
+        更新当前验证集指标并判断是否应当早停。
+        """
         if self.best is None or current < self.best - self.min_delta:
             self.best = current
             self.num_bad_epochs = 0
@@ -36,9 +79,7 @@ class EarlyStopping:
 # ===========================
 def lognormal_nll(dt, mu, log_sigma, eps: float = 1e-8) -> torch.Tensor:
     """
-    dt:        标量或张量 (实数 > 0)
-    mu:        对应 log(dt) 的均值
-    log_sigma: 对应 log(dt) 的 log 标准差
+    计算 LogNormal 对数似然的负号（NLL）。
     """
     dt = torch.clamp(dt, min=eps)
     sigma = torch.exp(log_sigma)
@@ -49,7 +90,7 @@ def lognormal_nll(dt, mu, log_sigma, eps: float = 1e-8) -> torch.Tensor:
 
 def lognormal_mean(mu, log_sigma):
     """
-    E[dt] 的解析表达式（如果以后想在原始 Δt 空间做估计仍然可以用）。
+    LogNormal 的解析期望 E[dt]，如有需要可用于在原始 Δt 空间做估计。
     """
     sigma = torch.exp(log_sigma)
     return torch.exp(mu + 0.5 * sigma ** 2)
@@ -59,6 +100,10 @@ def lognormal_mean(mu, log_sigma):
 # 2. 图编码器：GConvGRU
 # ===========================
 class GraphEncoder(nn.Module):
+    """
+    使用 GConvGRU 对时序图快照序列进行编码，得到图级或节点级表示。
+    """
+
     def __init__(self, in_channels: int, hidden_dim: int = None, hidden_channels: int = None, K: int = 3):
         super().__init__()
         if hidden_dim is None and hidden_channels is None:
@@ -73,9 +118,6 @@ class GraphEncoder(nn.Module):
         """
         X_seq: (T_snap, N, F_in)
         edge_index: (2, E)
-        return_node_repr:
-          - False: 只返回图级表示 g_t
-          - True:  返回 (g_t, H_all)，其中 H_all 是长度为 T_snap 的列表，每个元素形状 (N, hidden_dim)
         """
         H = None
         H_all = []
@@ -84,8 +126,7 @@ class GraphEncoder(nn.Module):
             H = self.gconvgru(x_t, edge_index, None, H, None)  # (N, hidden_dim)
             H_all.append(H)
 
-        # 图级池化：对最后一个时间步的节点表示取平均
-        g_t = H.mean(dim=0)  # (hidden_dim,)
+        g_t = H.mean(dim=0)  # 图级池化
 
         if return_node_repr:
             return g_t, H_all
@@ -97,13 +138,19 @@ class GraphEncoder(nn.Module):
 # 3. 时间编码器：GRU on Δt
 # ===========================
 class TimeEncoder(nn.Module):
+    """
+    简单的 GRU 时间编码器，将一段历史 Δt 序列编码为固定维度的时间表示。
+    """
+
     def __init__(self, hidden_dim: int):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.gru = nn.GRU(input_size=1, hidden_size=self.hidden_dim, batch_first=True)
 
     def forward(self, dt_history: torch.Tensor) -> torch.Tensor:
-        # dt_history: (L_hist,)
+        """
+        dt_history: (L_hist,)
+        """
         x = dt_history.view(1, -1, 1)  # (1, L_hist, 1)
         _, h = self.gru(x)            # h: (1, hidden_dim)
         h = h.view(-1)                # (hidden_dim,)
@@ -114,6 +161,10 @@ class TimeEncoder(nn.Module):
 # 4. GC-TPP 主模型（Core + 正则/Dropout）
 # ===========================
 class GCTPPContinuous(nn.Module):
+    """
+    GC-TPP Core 模型：图编码 + 时间编码 + MLP 输出 LogNormal 参数。
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -142,8 +193,8 @@ class GCTPPContinuous(nn.Module):
         edge_index:  (2, E)
         dt_history:  (L_hist,)
         """
-        g_t = self.graph_encoder(X_snapshots, edge_index)  # (graph_hidden_dim,)
-        h_t = self.time_encoder(dt_history)                # (time_hidden_dim,)
+        g_t = self.graph_encoder(X_snapshots, edge_index)
+        h_t = self.time_encoder(dt_history)
 
         z = torch.cat([g_t, h_t], dim=-1).view(1, -1)
         out = self.mlp(z).view(-1)
@@ -151,14 +202,12 @@ class GCTPPContinuous(nn.Module):
         mu = out[0]
         log_sigma = out[1]
 
-        # λ(t) = E[1/Δt] 只是一个示意，这里保留之前定义
         lambda_t = torch.exp(mu + 0.5 * torch.exp(2 * log_sigma))
-
         return mu, log_sigma, lambda_t
 
 
 # ===========================
-# 5. 从 Dataset 构建 Train/Val/Test（原版）
+# 5. 数据构建（含 Seen/OOD 标记）
 # ===========================
 def build_events_from_dataset(
     device: torch.device,
@@ -178,24 +227,27 @@ def build_events_from_dataset(
         save_to_disk=True,
     )
 
-    (idx_train, idx_val, idx_test,
-     event_times_train, event_times_val, event_times_test,
-     dt_train, dt_val, dt_test) = ds.get_train_val_test_split(
-        train_ratio=train_ratio, val_ratio=val_ratio
-    )
+    (
+        idx_train,
+        idx_val,
+        idx_test,
+        event_times_train,
+        event_times_val,
+        event_times_test,
+        dt_train,
+        dt_val,
+        dt_test,
+    ) = ds.get_train_val_test_split(train_ratio=train_ratio, val_ratio=val_ratio)
 
     X_list = ds.X_list
     edge_index = ds.edge_index
 
-    X_tensor = torch.stack(X_list, dim=0).to(device)  # (T_snap, N, F_in)
+    X_tensor = torch.stack(X_list, dim=0).to(device)
     edge_index = edge_index.to(device)
 
     return X_tensor, edge_index, event_times_train, dt_train, event_times_val, dt_val, event_times_test, dt_test
 
 
-# ===========================
-# 5.1 (Stage-5) 从 Dataset 构建 Train/Val/Test + Seen/OOD flags
-# ===========================
 def build_events_from_dataset_with_flags(
     device: torch.device,
     T_snap: int = 20,
@@ -204,10 +256,7 @@ def build_events_from_dataset_with_flags(
     val_ratio: float = 0.15,
 ):
     """
-    在原有切分基础上，额外生成 Seen/OOD 标记 flags。
-    flags 是一个 dict，包含：
-      - seen_train / seen_val / seen_test : bool Tensor
-      - ood_train  / ood_val  / ood_test  : bool Tensor
+    返回 X / edge_index / 各 split 时间与 dt / flags。
     """
     ds = GC_TPP_Dataset(
         snapshots_dir="./data/snapshots",
@@ -220,60 +269,69 @@ def build_events_from_dataset_with_flags(
         save_to_disk=True,
     )
 
-    (idx_train, idx_val, idx_test,
-     event_times_train, event_times_val, event_times_test,
-     dt_train, dt_val, dt_test) = ds.get_train_val_test_split(
-        train_ratio=train_ratio, val_ratio=val_ratio
-    )
+    (
+        idx_train,
+        idx_val,
+        idx_test,
+        event_times_train,
+        event_times_val,
+        event_times_test,
+        dt_train,
+        dt_val,
+        dt_test,
+    ) = ds.get_train_val_test_split(train_ratio=train_ratio, val_ratio=val_ratio)
 
     X_list = ds.X_list
     edge_index = ds.edge_index
 
     flags = ds.get_seen_ood_flags(idx_train, idx_val, idx_test)
 
-    X_tensor = torch.stack(X_list, dim=0).to(device)  # (T_snap, N, F_in)
+    X_tensor = torch.stack(X_list, dim=0).to(device)
     edge_index = edge_index.to(device)
 
     return (
         X_tensor,
         edge_index,
-        event_times_train, dt_train,
-        event_times_val,   dt_val,
-        event_times_test,  dt_test,
+        event_times_train,
+        dt_train,
+        event_times_val,
+        dt_val,
+        event_times_test,
+        dt_test,
         flags,
     )
 
 
 # ===========================
-# 6. 训练 & 验证 & 测试 主流程（含 RMSE/MAE + EarlyStopping）
+# 6. 训练 & 验证 & 测试 主流程（含种子）
 # ===========================
 def run_gc_tpp_continuous(data_mode: str = "toy"):
     """
-    注意：这里的 RMSE/MAE 已经改为在 log(Δt) 空间计算，
-    即比较 mu（预测的 log Δt 均值）和 log(dt_next)。
+    训练并评估 GC-TPP Core 模型的主入口。
     """
+    set_seed(0)  # 固定随机种子，便于主实验复现
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    max_history_len = 64   # 论文写作期：缩短历史长度，加快训练
+    max_history_len = 64
     T_snap = 20
 
-    # Protocol-B: Mixed split，增加训练比例
     train_ratio = 0.7
     val_ratio = 0.15
 
-    # 1) 取数据（Stage-5：带 Seen/OOD flags）
-    (X_snapshots,
-     edge_index,
-     event_times_train,
-     dt_train,
-     event_times_val,
-     dt_val,
-     event_times_test,
-     dt_test,
-     flags) = build_events_from_dataset_with_flags(
+    (
+        X_snapshots,
+        edge_index,
+        event_times_train,
+        dt_train,
+        event_times_val,
+        dt_val,
+        event_times_test,
+        dt_test,
+        flags,
+    ) = build_events_from_dataset_with_flags(
         device=device, T_snap=T_snap, mode=data_mode, train_ratio=train_ratio, val_ratio=val_ratio
     )
 
-    # 2) 初始化模型
     in_channels = X_snapshots.size(-1)
     model = GCTPPContinuous(
         in_channels=in_channels,
@@ -284,22 +342,21 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
         dropout_prob=0.2,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)  # L2 正则
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
     early_stopper = EarlyStopping(patience=3, min_delta=1e-3)
 
-    num_epochs = 15  # 论文写作期：先跑 15 个 epoch 看趋势
+    num_epochs = 15
 
-    train_nll_list = []
-    val_nll_list = []
-    train_rmse_list = []
-    val_rmse_list = []
-    train_mae_list = []
-    val_mae_list = []
+    train_nll_list, val_nll_list = [], []
+    train_rmse_list, val_rmse_list = [], []
+    train_mae_list, val_mae_list = [], []
 
-    # 3) 训练 + 验证
+    best_val_nll = float("inf")
+
+    # ---------- Train + Val ----------
     for epoch in range(1, num_epochs + 1):
-        # ---- Train ----
+        # Train
         model.train()
         train_total_nll = 0.0
         train_se_sum = 0.0
@@ -316,7 +373,6 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
             mu, log_sigma, lambda_t = model(X_snapshots, edge_index, dt_history)
             nll = lognormal_nll(dt_next, mu, log_sigma)
 
-            # 在 log(Δt) 空间计算误差
             log_dt_true = torch.log(torch.clamp(dt_next, min=1e-8))
             log_dt_pred = mu.detach()
             err_log = log_dt_pred - log_dt_true
@@ -338,7 +394,7 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
         train_rmse_list.append(train_rmse)
         train_mae_list.append(train_mae)
 
-        # ---- Val ----
+        # Val
         model.eval()
         val_total_nll = 0.0
         val_se_sum = 0.0
@@ -381,13 +437,14 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
 
         scheduler.step(avg_val_nll)
 
+        if avg_val_nll < best_val_nll:
+            best_val_nll = avg_val_nll
+
         if early_stopper.step(avg_val_nll):
             print(f"[INFO] Early stopping triggered at epoch {epoch}. Best Val NLL = {early_stopper.best:.4f}")
             break
 
-    # ===========================
-    # 4) 测试集评估（Stage-5：分 Seen / OOD）
-    # ===========================
+    # ---------- Test (Seen / OOD) ----------
     model.eval()
 
     test_total_nll = 0.0
@@ -408,7 +465,6 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
     seen_test = flags["seen_test"] if isinstance(flags, dict) and "seen_test" in flags else None
     ood_test = flags["ood_test"] if isinstance(flags, dict) and "ood_test" in flags else None
 
-    # flags 覆盖情况
     try:
         n_dt = int(dt_test.numel()) if hasattr(dt_test, "numel") else None
         n_seen = int(seen_test.numel()) if (seen_test is not None and hasattr(seen_test, "numel")) else None
@@ -490,9 +546,6 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
     print(f"[INFO] Test RMSE (log Δt, OOD)  = {test_rmse_ood:.4f} | count={test_count_ood}")
     print(f"[INFO] Test MAE  (log Δt, OOD)  = {test_mae_ood:.4f} | count={test_count_ood}")
 
-    # ===========================
-    # 5) 保存曲线（含 Seen/OOD Test 指标）
-    # ===========================
     os.makedirs("logs", exist_ok=True)
     if data_mode == "toy":
         save_path = "logs/gc_tpp_core_toy.npz"
@@ -509,23 +562,41 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
         val_rmse=np.array(val_rmse_list),
         train_mae=np.array(train_mae_list),
         val_mae=np.array(val_mae_list),
-
         test_nll=avg_test_nll,
         test_rmse=test_rmse,
         test_mae=test_mae,
-
         test_nll_seen=avg_test_nll_seen,
         test_rmse_seen=test_rmse_seen,
         test_mae_seen=test_mae_seen,
         test_count_seen=test_count_seen,
-
         test_nll_ood=avg_test_nll_ood,
         test_rmse_ood=test_rmse_ood,
         test_mae_ood=test_mae_ood,
         test_count_ood=test_count_ood,
+        best_val_nll=best_val_nll,
     )
     print(f"[INFO] Saved Core curves to {save_path}")
 
-
-
-
+    results = {
+        "data_mode": data_mode,
+        "train_nll": train_nll_list,
+        "val_nll": val_nll_list,
+        "train_rmse": train_rmse_list,
+        "val_rmse": val_rmse_list,
+        "train_mae": train_mae_list,
+        "val_mae": val_mae_list,
+        "test_nll": avg_test_nll,
+        "test_rmse": test_rmse,
+        "test_mae": test_mae,
+        "test_nll_seen": avg_test_nll_seen,
+        "test_rmse_seen": test_rmse_seen,
+        "test_mae_seen": test_mae_seen,
+        "test_count_seen": test_count_seen,
+        "test_nll_ood": avg_test_nll_ood,
+        "test_rmse_ood": test_rmse_ood,
+        "test_mae_ood": test_mae_ood,
+        "test_count_ood": test_count_ood,
+        "best_val_nll": best_val_nll,
+        "log_path": save_path,
+    }
+    return results

@@ -93,16 +93,59 @@ class GC_TPP_Dataset:
         idx_test: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
-        基于 (src, dst, ev_type) 三元组，生成 Seen/OOD 标记。
+        基于 (src, dst, ev_type) 三元组，生成 Train/Val/Test 的 Seen/OOD 标记。
 
-        定义：
-          - Seen 事件：其 (src, dst, type) 三元组在训练集中出现过
-          - OOD 事件：其 (src, dst, type) 三元组从未在训练集中出现，在 Val/Test 中首次出现
+        【与 dt / idx 的对齐关系（重点）】
+        ------------------------------------------------------------
+        - 在 get_train_val_test_split 中，我们对 event_times 和 dt 使用相同的
+          索引 idx_train / idx_val / idx_test：
+              ev_time_train = event_times[idx_train]
+              dt_train      = dt[idx_train]
+          因此：
+              len(dt_train) == len(idx_train)
+              len(dt_val)   == len(idx_val)
+              len(dt_test)  == len(idx_test)
 
-        返回:
-          dict，包含：
-            seen_train, seen_val, seen_test  : bool Tensor
-            ood_train,  ood_val,  ood_test   : bool Tensor
+        - 本函数首先在“全体事件序列”上构造训练三元组集合：
+              train_triplets = { (src[i], dst[i], ev_type[i]) | i ∈ idx_train }
+
+        - 随后对每个 split 逐个索引 i ∈ idx_train / idx_val / idx_test，
+          针对该索引对应的三元组 (src[i], dst[i], ev_type[i]) 判断：
+              如果在 train_triplets 中出现过 → Seen
+              否则 → OOD
+
+          得到的 seen_train / seen_val / seen_test 与 ood_train / ood_val / ood_test
+          均为一维 BoolTensor，其长度与对应的 idx_* 完全一致：
+              len(seen_train) == len(idx_train) == len(dt_train)
+              len(seen_val)   == len(idx_val)   == len(dt_val)
+              len(seen_test)  == len(idx_test)  == len(dt_test)
+
+          也就是说：
+              seen_test[k] / ood_test[k] 与 dt_test[k]、
+              ev_time_test[k] 描述的是**同一段事件间隔/同一条事件**是否在 Train 中
+              以相同的 (src, dst, type) 形式出现过。
+
+        【Seen / OOD 定义】
+        ------------------------------------------------------------
+        - Seen 事件：其 (src, dst, type) 三元组在训练集 idx_train 中至少出现一次；
+        - OOD 事件：其三元组在训练集中从未出现，在 Val/Test 中是“新组合”。
+
+        返回
+        ----
+        flags : dict[str, torch.BoolTensor]
+            {
+              "seen_train": BoolTensor[len(idx_train)],
+              "seen_val"  : BoolTensor[len(idx_val)],
+              "seen_test" : BoolTensor[len(idx_test)],
+              "ood_train" : BoolTensor[len(idx_train)],
+              "ood_val"   : BoolTensor[len(idx_val)],
+              "ood_test"  : BoolTensor[len(idx_test)],
+            }
+
+        这些标记与 gc_tpp_continuous.py / gc_tpp_struct.py 中的
+        dt_train / dt_val / dt_test 在长度与顺序上一一对应，
+        可直接用来计算 Train/Val/Test 中 Seen 和 OOD 事件各自的
+        NLL / RMSE / MAE 指标（包括 Stage-5 / Stage-5+11 / Stage-11 等后续实验）。
         """
         if self._seen_ood_flags is not None:
             return self._seen_ood_flags
@@ -403,7 +446,6 @@ class GC_TPP_Dataset:
         if event_times.numel() > 1:
             dt[1:] = event_times[1:] - event_times[:-1]
         return dt
-
 
 
 # =============================

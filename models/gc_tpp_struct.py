@@ -1,3 +1,16 @@
+"""
+GC-TPP Struct model (Stage-5+11 early)
+
+本文件在 GC-TPP Core 模型的基础上，构建节点级结构化版本：
+- 复用 GraphEncoder / TimeEncoder；
+- 在最后一张 snapshot 上，为每个节点 i 生成 [mu_i, log_sigma_i]；
+- 对所有节点的 LogNormal NLL 取平均作为损失；
+- 训练与评估流程与 Core 版本保持尽量一致，支持 toy / icews_real / icews_real_topk500 等 data_mode；
+- 显式区分 Test-全体 / Test-Seen / Test-OOD 的 NLL / RMSE / MAE，
+  并将曲线与指标保存到 logs/gc_tpp_struct_*.npz，作为 Stage-5+11(early)
+  和后续 typed / Top-K / 主结果表的结构化基线。
+"""
+
 import os
 import math
 import numpy as np
@@ -10,6 +23,7 @@ from .gc_tpp_continuous import (
     TimeEncoder,
     EarlyStopping,
     lognormal_nll,
+    set_seed,   # 新增：复用 Core 中的种子设置
 )
 
 
@@ -53,30 +67,24 @@ class GCTPPStruct(nn.Module):
         edge_index:  (2, E)
         dt_history:  (L_hist,)
         """
-        # 1) 图编码：拿到最后一张 snapshot 的节点表示 H_last
         g_t, H_all = self.graph_encoder(X_snapshots, edge_index, return_node_repr=True)
         H_last = H_all[-1]  # (N, hidden_dim)
 
-        # 2) 时间编码
         h_t = self.time_encoder(dt_history)  # (time_hidden_dim,)
         h_rep = h_t.unsqueeze(0).expand(H_last.size(0), -1)  # (N, time_hidden_dim)
 
-        # 3) 拼接得到每个节点的特征
         z_nodes = torch.cat([H_last, h_rep], dim=-1)  # (N, fusion_dim)
 
-        # 4) 节点级 [mu_i, log_sigma_i]
         out = self.node_mlp(z_nodes)  # (N, 2)
-        mu_nodes = out[:, 0]          # (N,)
-        log_sigma_nodes = out[:, 1]   # (N,)
+        mu_nodes = out[:, 0]
+        log_sigma_nodes = out[:, 1]
 
-        # 5) 节点 λ_i(t)，用于 debug 观察
         lambda_nodes = torch.exp(mu_nodes + 0.5 * torch.exp(2 * log_sigma_nodes))
-
         return mu_nodes, log_sigma_nodes, lambda_nodes
 
 
 # ===========================
-# 2. 从 Dataset 构建 Train/Val/Test（原版）
+# 2. 数据构建（含 Seen/OOD）
 # ===========================
 def build_events_from_dataset(
     device: torch.device,
@@ -96,26 +104,21 @@ def build_events_from_dataset(
         save_to_disk=True,
     )
 
-    # 现在 get_train_val_test_split 返回 9 个值：3个索引 + 3段时间 + 3段dt
     (idx_train, idx_val, idx_test,
      event_times_train, event_times_val, event_times_test,
      dt_train, dt_val, dt_test) = ds.get_train_val_test_split(
         train_ratio=train_ratio, val_ratio=val_ratio
     )
 
-    # X_list 和 edge_index 直接从 ds 里取
     X_list = ds.X_list
     edge_index = ds.edge_index
 
-    X_tensor = torch.stack(X_list, dim=0).to(device)  # (T_snap, N, F_in)
+    X_tensor = torch.stack(X_list, dim=0).to(device)
     edge_index = edge_index.to(device)
 
     return X_tensor, edge_index, event_times_train, dt_train, event_times_val, dt_val, event_times_test, dt_test
 
 
-# ===========================
-# 2.1 (Stage-5) 从 Dataset 构建 Train/Val/Test + Seen/OOD flags（新版）
-# ===========================
 def build_events_from_dataset_with_flags(
     device: torch.device,
     T_snap: int = 20,
@@ -139,24 +142,19 @@ def build_events_from_dataset_with_flags(
         save_to_disk=True,
     )
 
-    # 同样按 9 个返回值来解包
     (idx_train, idx_val, idx_test,
      event_times_train, event_times_val, event_times_test,
      dt_train, dt_val, dt_test) = ds.get_train_val_test_split(
         train_ratio=train_ratio, val_ratio=val_ratio
     )
 
-    # X_list 和 edge_index 从 ds 中取得
     X_list = ds.X_list
     edge_index = ds.edge_index
 
-    # Seen / OOD 标记
     flags = ds.get_seen_ood_flags(idx_train, idx_val, idx_test)
-
-    # 标准化 triplets 切分接口：供 typed-proxy 使用
     triplets = ds.get_triplets_split(idx_train, idx_val, idx_test)
 
-    X_tensor = torch.stack(X_list, dim=0).to(device)  # (T_snap, N, F_in)
+    X_tensor = torch.stack(X_list, dim=0).to(device)
     edge_index = edge_index.to(device)
 
     return (
@@ -175,22 +173,19 @@ def build_events_from_dataset_with_flags(
 # ===========================
 def run_gc_tpp_struct(data_mode: str = "toy"):
     """
-    Struct 版本的训练流程：
-    - 损失仍然是节点级 LogNormal NLL（对节点求平均）
-    - RMSE/MAE 改为在 log(Δt) 空间计算：比较 mu_i 和 log(dt_next)
-      （这里把所有节点的误差做平均）
+    训练并评估 GC-TPP Struct 模型的主入口（Stage-5+11 early）。
     """
+    set_seed(0)  # 与 Core 使用同一个随机种子
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    max_history_len = 64   # 论文写作期：缩短历史长度，加快训练
+    max_history_len = 64
     T_snap = 20
 
-    # Protocol-B: Mixed split，增加训练比例
     train_ratio = 0.7
     val_ratio = 0.15
 
     mode_tag = "toy" if data_mode == "toy" else data_mode
 
-    # 1) 取数据（Stage-5：带 Seen/OOD flags）
     (X_snapshots,
      edge_index,
      event_times_train,
@@ -203,7 +198,6 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
         device=device, T_snap=T_snap, mode=data_mode, train_ratio=train_ratio, val_ratio=val_ratio
     )
 
-    # 2) 初始化模型
     in_channels = X_snapshots.size(-1)
     model = GCTPPStruct(
         in_channels=in_channels,
@@ -218,7 +212,7 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
     early_stopper = EarlyStopping(patience=3, min_delta=1e-3)
 
-    num_epochs = 15  # 论文写作期：先跑 15 个 epoch 看趋势
+    num_epochs = 15
 
     train_nll_list = []
     val_nll_list = []
@@ -236,9 +230,6 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
         )
     )
 
-    # ===========================
-    # (Stage-4) typed-proxy：显式 triplets（优先 val/test），不再依赖“猜字段名”
-    # ===========================
     src_train = dst_train = type_train = None
     src_val = dst_val = type_val = None
     src_test = dst_test = type_test = None
@@ -248,14 +239,12 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
         if trip_reason != "ok":
             print(f"[WARN] Triplets split unavailable -> reason={trip_reason}")
         else:
-            # dataset_toy.get_triplets_split() 返回 CPU LongTensor（只用于 debug）
             src_train, dst_train, type_train = triplets["src_train"], triplets["dst_train"], triplets["type_train"]
             src_val,   dst_val,   type_val   = triplets["src_val"],   triplets["dst_val"],   triplets["type_val"]
             src_test,  dst_test,  type_test  = triplets["src_test"],  triplets["dst_test"],  triplets["type_test"]
 
-    # 3) 训练 + 验证
+    # ---------- Train + Val ----------
     for epoch in range(1, num_epochs + 1):
-        # ---- Train ----
         model.train()
         train_total_nll = 0.0
         train_se_sum = 0.0
@@ -272,11 +261,9 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
 
             mu_nodes, log_sigma_nodes, lambda_nodes = model(X_snapshots, edge_index, dt_history)
 
-            # 节点级 NLL，取平均
-            nll_nodes = lognormal_nll(dt_next, mu_nodes, log_sigma_nodes)  # (N,)
+            nll_nodes = lognormal_nll(dt_next, mu_nodes, log_sigma_nodes)
             nll = nll_nodes.mean()
 
-            # log(Δt) 空间误差：对所有节点平均
             log_dt_true = torch.log(torch.clamp(dt_next, min=1e-8))
             log_dt_pred_nodes = mu_nodes.detach()
             err_log_nodes = log_dt_pred_nodes - log_dt_true
@@ -292,7 +279,7 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
 
             train_total_nll += float(nll.item())
             train_count += 1
-            debug_lambda = lambda_nodes  # 用最后一次的 λ_i(t) 打印示例
+            debug_lambda = lambda_nodes
 
         avg_train_nll = train_total_nll / max(train_count, 1)
         train_rmse = math.sqrt(train_se_sum / max(train_count, 1))
@@ -302,7 +289,6 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
         train_rmse_list.append(train_rmse)
         train_mae_list.append(train_mae)
 
-        # ---- Val ----
         model.eval()
         val_total_nll = 0.0
         val_se_sum = 0.0
@@ -343,7 +329,6 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
         val_rmse_list.append(val_rmse)
         val_mae_list.append(val_mae)
 
-        # 输出训练和验证结果
         print(
             f"Epoch {epoch:02d} | GC-TPP-Struct ({mode_tag}) "
             f"Train NLL = {avg_train_nll:.4f} | Val NLL = {avg_val_nll:.4f} "
@@ -351,20 +336,16 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
             f"| Train MAE (log Δt) = {train_mae:.4f} | Val MAE (log Δt) = {val_mae:.4f}"
         )
 
-        # 打印一个节点 λ_i(t) 的示例（前 5 个）
         if debug_lambda_val is not None:
             lam_np = debug_lambda_val.detach().cpu().numpy()
             print(f"    [DEBUG] 示例节点 λ_i(t) (前 5 个) = {lam_np[:5]}")
 
-        # 学习率调度 & 早停
         scheduler.step(avg_val_nll)
         if early_stopper.step(avg_val_nll):
             print(f"[INFO] Early stopping triggered at epoch {epoch}. Best Val NLL = {early_stopper.best:.4f}")
             break
 
-    # ===========================
-    # 4) 测试集评估（Stage-5：分 Seen / OOD）
-    # ===========================
+    # ---------- Test (Seen / OOD) ----------
     model.eval()
 
     test_total_nll = 0.0
@@ -385,7 +366,6 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
     seen_test = flags["seen_test"] if isinstance(flags, dict) and "seen_test" in flags else None
     ood_test = flags["ood_test"] if isinstance(flags, dict) and "ood_test" in flags else None
 
-    # flags 覆盖情况
     try:
         n_dt = int(dt_test.numel()) if hasattr(dt_test, "numel") else None
         n_seen = int(seen_test.numel()) if (seen_test is not None and hasattr(seen_test, "numel")) else None
@@ -410,7 +390,7 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
 
             mu_nodes, log_sigma_nodes, lambda_nodes = model(X_snapshots, edge_index, dt_history)
 
-            nll_nodes = lognormal_nll(dt_next, mu_nodes, log_sigma_nodes)  # (N,)
+            nll_nodes = lognormal_nll(dt_next, mu_nodes, log_sigma_nodes)
             nll = nll_nodes.mean()
 
             log_dt_true = torch.log(torch.clamp(dt_next, min=1e-8))
@@ -472,9 +452,6 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
     print(f"[INFO] Test RMSE (log Δt, Struct {mode_tag}, OOD)  = {test_rmse_ood:.4f} | count={test_count_ood}")
     print(f"[INFO] Test MAE  (log Δt, Struct {mode_tag}, OOD)  = {test_mae_ood:.4f} | count={test_count_ood}")
 
-    # ===========================
-    # 5) 保存曲线（含 Seen/OOD Test 指标）
-    # ===========================
     os.makedirs("logs", exist_ok=True)
     if data_mode == "toy":
         save_path = "logs/gc_tpp_struct_toy.npz"
@@ -491,19 +468,39 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
         val_rmse=np.array(val_rmse_list),
         train_mae=np.array(train_mae_list),
         val_mae=np.array(val_mae_list),
-
         test_nll=avg_test_nll,
         test_rmse=test_rmse,
         test_mae=test_mae,
-
         test_nll_seen=avg_test_nll_seen,
         test_rmse_seen=test_rmse_seen,
         test_mae_seen=test_mae_seen,
         test_count_seen=test_count_seen,
-
         test_nll_ood=avg_test_nll_ood,
         test_rmse_ood=test_rmse_ood,
         test_mae_ood=test_mae_ood,
         test_count_ood=test_count_ood,
     )
     print(f"[INFO] Saved Struct curves to {save_path}")
+
+    results = {
+        "data_mode": data_mode,
+        "train_nll": train_nll_list,
+        "val_nll": val_nll_list,
+        "train_rmse": train_rmse_list,
+        "val_rmse": val_rmse_list,
+        "train_mae": train_mae_list,
+        "val_mae": val_mae_list,
+        "test_nll": avg_test_nll,
+        "test_rmse": test_rmse,
+        "test_mae": test_mae,
+        "test_nll_seen": avg_test_nll_seen,
+        "test_rmse_seen": test_rmse_seen,
+        "test_mae_seen": test_mae_seen,
+        "test_count_seen": test_count_seen,
+        "test_nll_ood": avg_test_nll_ood,
+        "test_rmse_ood": test_rmse_ood,
+        "test_mae_ood": test_mae_ood,
+        "test_count_ood": test_count_ood,
+        "log_path": save_path,
+    }
+    return results
