@@ -1,0 +1,21 @@
+{
+  "mode": "icews_real_topk500_K500",
+  "snapshots_dir": "data/snapshots",
+  "events_dir": "data/events",
+  "T": 20,
+  "N": 10,
+  "F_in": 3,
+  "train_ratio": 0.7,
+  "val_ratio": 0.15,
+  "n_total": 5000,
+  "n_train": 3500,
+  "n_val": 750,
+  "n_test": 750,
+  "n_test_next_event": 749,
+  "seen_test_count": 422,
+  "ood_test_count": 328,
+  "seen_next_event_count": 422,
+  "ood_next_event_count": 327,
+  "seen_ood_key": "(src, dst, coarse_type)",
+  "flags_semantics": "per-split flags aligned with idx_test positions"
+}

@@ -1,0 +1,54 @@
+{
+  "meta": {
+    "protocol": "protB",
+    "data_mode": "icews_real_topk500_K500",
+    "model": "gc_tpp_struct_typed",
+    "seed": 1,
+    "timestamp": "20260104-201228"
+  },
+  "summary": {
+    "test": {
+      "all": {
+        "count": 749,
+        "time_nll": -16.99606792057786,
+        "logdt_rmse": 1.7929730525766943,
+        "logdt_mae": 0.9393665168250355,
+        "cov90": 0.0
+      },
+      "seen": {
+        "count": 422,
+        "time_nll": -16.95919663307226,
+        "logdt_rmse": 1.9111322063870069,
+        "logdt_mae": 0.9602079701861499,
+        "cov90": 0.0
+      },
+      "ood": {
+        "count": 327,
+        "time_nll": -17.04365105001934,
+        "logdt_rmse": 1.6278591597105767,
+        "logdt_mae": 0.9124702069828634,
+        "cov90": 0.0
+      }
+    }
+  },
+  "by_coarse_type_ood": [
+    {
+      "coarse_id": 0,
+      "coarse_type": "Other",
+      "count": 54,
+      "time_nll": -17.183143227188676,
+      "logdt_rmse": 0.8951120999493216,
+      "logdt_mae": 0.8270225582851304,
+      "cov90": 0.0
+    },
+    {
+      "coarse_id": 1,
+      "coarse_type": "Protest",
+      "count": 273,
+      "time_nll": -17.01605919079903,
+      "logdt_rmse": 1.7365489690493625,
+      "logdt_mae": 0.9293719396923051,
+      "cov90": 0.0
+    }
+  ]
+}

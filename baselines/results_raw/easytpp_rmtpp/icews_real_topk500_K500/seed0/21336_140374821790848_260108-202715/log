@@ -1,0 +1,2 @@
+2026-01-08 20:27:15,548 - base_runner.py[pid:21336;line:176:save_log] - INFO: Save the log to baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/21336_140374821790848_260108-202715/log
+2026-01-08 20:27:16,049 - tpp_runner.py[pid:21336;line:60:_init_model] - INFO: Num of model parameters 99559

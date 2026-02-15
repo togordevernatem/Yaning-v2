@@ -1,0 +1,55 @@
+data_config:
+  train_dir: baselines/easytpp/data/icews_real_topk500_K500_seqnode/train.pkl
+  valid_dir: baselines/easytpp/data/icews_real_topk500_K500_seqnode/valid.pkl
+  test_dir: baselines/easytpp/data/icews_real_topk500_K500_seqnode/test.pkl
+  data_format: pkl
+  data_specs:
+    num_event_types: 1453
+    pad_token_id: 2
+    padding_side: null
+    truncation_side: null
+    padding_strategy: null
+    truncation_strategy: null
+    max_len: null
+base_config:
+  stage: train
+  backend: torch
+  dataset_id: icews_real_topk500_K500
+  runner_id: std_tpp
+  model_id: RMTPP
+  base_dir: baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0
+  specs:
+    log_folder: baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/22862_129125973460096_260108-211055
+    saved_model_dir: baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/22862_129125973460096_260108-211055/models/saved_model
+    saved_log_dir: baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/22862_129125973460096_260108-211055/log
+    output_config_dir: baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/22862_129125973460096_260108-211055/RMTPP_icews_real_topk500_K500_output.yaml
+model_config:
+  rnn_type: LSTM
+  hidden_size: 32
+  time_emb_size: 16
+  num_layers: 2
+  sharing_param_layer: false
+  loss_integral_num_sample_per_step: 20
+  dropout_rate: 0.0
+  use_ln: false
+  thinning: null
+  num_event_types_pad: 1454
+  num_event_types: 1453
+  event_pad_index: 2
+  model_id: RMTPP
+  pretrained_model_dir: null
+  gpu: -1
+  model_specs: {}
+trainer_config:
+  seed: 0
+  gpu: -1
+  batch_size: 64
+  max_epoch: 1
+  shuffle: false
+  optimizer: adam
+  learning_rate: 0.001
+  valid_freq: 1
+  use_tfb: false
+  metrics:
+  - acc
+  - rmse

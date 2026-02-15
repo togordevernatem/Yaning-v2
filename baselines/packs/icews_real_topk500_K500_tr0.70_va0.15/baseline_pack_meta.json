@@ -1,0 +1,12 @@
+{
+  "data_mode": "icews_real_topk500_K500",
+  "train_ratio": 0.7,
+  "val_ratio": 0.15,
+  "truncate": 5000,
+  "n_total": 5000,
+  "n_train": 3500,
+  "n_val": 750,
+  "n_test": 750,
+  "n_test_seen": 422,
+  "n_test_ood": 328
+}

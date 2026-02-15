@@ -1,0 +1,111 @@
+// SE-GC-TPP Pipeline
+digraph "SE-GC-TPP_Flowchart" {
+	graph [bgcolor=white fontname=Arial fontsize=10 rankdir=LR splines=ortho]
+	node [fontname=Arial fontsize=9 shape=box]
+	edge [arrowsize=0.8 fontname=Arial fontsize=8]
+	subgraph cluster_Infra {
+		label="Data Infrastructure (2005-2015)" rank=same
+		RawDS [label="ICEWS Dataset" color="#455a64" fillcolor="#eceff1" penwidth=2 shape=ellipse style=filled]
+		Split [label="Strict Split
+(No Leakage)" color="#455a64" fillcolor="#eceff1" penwidth=2 shape=diamond style=filled]
+		TrainH [label="Train History
+H_tr" color="#455a64" fillcolor="#eceff1" penwidth=2 shape=ellipse style=filled]
+		RawDS -> Split
+		Split -> TrainH [label="70% Train"]
+	}
+	subgraph cluster_Phase1 {
+		label="Phase 1: Offline DIMVP++ Construction (Train-Only)" rank=same
+		LLM [label="LLM Agent (Frozen)
+Role: Prior & Compression
+Temp=0, Cached, No Ext Facts" color="#d32f2f" fillcolor="#ffebee" penwidth=3 shape=parallelogram style="filled,dashed"]
+		subgraph cluster_ViewA {
+			label="View A: Anchor"
+			Counts [label="Raw Type Counts
+cnt(c)" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			Dirichlet [label="Dirichlet Smooth
+α > 0" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			Counts -> Dirichlet
+		}
+		subgraph cluster_ViewB {
+			label="View B: Momentum"
+			PriorLambda [label="Prior λ_hat" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			InitTheta [label="Init θ & Reg Target" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			LearnDecay [label="Learnable Decay λ
+softplus(θ)" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			WeightedCnt [label="Weighted Count
+exp(-λΔt)" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			PostSmooth [label="Post-Smoothing
+with View A" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			PriorLambda -> InitTheta
+			InitTheta -> LearnDecay [style=dashed]
+			LearnDecay -> WeightedCnt
+			WeightedCnt -> PostSmooth
+		}
+		subgraph cluster_ViewC {
+			label="View C: Semantic"
+			Codebook [label="Codebook Defs
+def(c)" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			Tmpl [label="Train Templates
+T_u_tr" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			Summary [label="Controlled Summary
+Train-only facts" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			OpenEnc1 [label="Open Encoder φ
+(SBERT/MiniLM)" color="#9c27b0" fillcolor="#f3e5f5" penwidth=2 shape=parallelogram style="filled,dashed"]
+			OpenEnc2 [label="Open Encoder ψ
+(SBERT/MiniLM)" color="#9c27b0" fillcolor="#f3e5f5" penwidth=2 shape=parallelogram style="filled,dashed"]
+			MixCode [label="Codebook Mix
+(Weighted by A)" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			ConcatC [label="Fuse
+Concat & Project" color="#ff9800" fillcolor="#fff3e0" penwidth=2 style=filled]
+			Codebook -> OpenEnc1
+			Tmpl -> Summary
+			Summary -> OpenEnc2
+			OpenEnc1 -> MixCode
+			MixCode -> ConcatC
+			OpenEnc2 -> ConcatC
+		}
+		TrainH -> Counts
+		TrainH -> WeightedCnt
+		TrainH -> Tmpl
+		Dirichlet -> PostSmooth [style=dashed]
+		Dirichlet -> MixCode [style=dashed]
+		LLM -> PriorLambda [label="Define λ" style=dashed]
+		LLM -> Summary [label=Summarize style=dashed]
+	}
+	ProfileP [label="Static Profile Matrix P
+Concat(A, B, C)
+Dim: N x D_p" color="#fbc02d" fillcolor="#fff9c4" penwidth=3 shape=parallelogram style=filled]
+	Dirichlet -> ProfileP
+	PostSmooth -> ProfileP
+	ConcatC -> ProfileP
+	subgraph cluster_Phase2 {
+		label="Phase 2: Online SE-GC-TPP Modeling (Dynamic)" rank=same
+		Snapshot [label="Graph Snapshot
+G(t)" color="#3f51b5" fillcolor="#e8eaf6" penwidth=2 shape=ellipse style=filled]
+		TimeDelta [label="Time Δt" color="#3f51b5" fillcolor="#e8eaf6" penwidth=2 shape=ellipse style=filled]
+		Inject [label="Feature Injection
+Concat [ X_t || P_u ]" color="#3f51b5" fillcolor="#e8eaf6" penwidth=2 shape=diamond style=filled]
+		GConvGRU [label="GConvGRU
+Dynamic Encoder" color="#3f51b5" fillcolor="#e8eaf6" penwidth=2 style=filled]
+		TimeEnc [label="Time Encoder" color="#3f51b5" fillcolor="#e8eaf6" penwidth=2 style=filled]
+		Fusion [label="Fusion MLP" color="#3f51b5" fillcolor="#e8eaf6" penwidth=2 style=filled]
+		Head [label="TPP Head
+LogNormal(μ, σ)" color="#3f51b5" fillcolor="#e8eaf6" penwidth=2 shape=ellipse style=filled]
+		Snapshot -> Inject
+		Inject -> GConvGRU
+		GConvGRU -> Fusion
+		TimeDelta -> TimeEnc
+		TimeEnc -> Fusion
+		Fusion -> Head
+	}
+	ProfileP -> Inject [label="Static Lookup" style=bold]
+	NLL [label="NLL Loss
+Main Task" color="#ff5722" fillcolor="#fbe9e7" penwidth=2 style=filled]
+	RegLoss [label="Reg Loss
+γ(λ - λ_hat)²" color="#ff5722" fillcolor="#fbe9e7" penwidth=2 style=filled]
+	TotalLoss [label="Total Loss" color="#ff5722" fillcolor="#fbe9e7" penwidth=2 shape=ellipse style=filled]
+	Head -> NLL
+	InitTheta -> RegLoss [label=Regularization style=dashed]
+	NLL -> TotalLoss
+	RegLoss -> TotalLoss
+}

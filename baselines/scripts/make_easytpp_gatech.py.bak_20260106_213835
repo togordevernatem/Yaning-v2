@@ -1,0 +1,57 @@
+import os, argparse
+import numpy as np
+
+def load_npz(path):
+    z = np.load(path, allow_pickle=True)
+    return {k: z[k] for k in z.files}
+
+def build_seq(event_time, dt, mark, eps=1e-8, time_mode="log_dt"):
+    seq = []
+    t_cum = 0.0
+    for t, d, m in zip(event_time, dt, mark):
+        d = float(d)
+        d = max(d, eps)
+        if time_mode == "log_dt":
+            d_use = float(np.log(d))
+            t_cum += d_use
+            t_use = t_cum
+        else:
+            # raw dt
+            d_use = d
+            t_use = float(t)
+        seq.append({
+            "time_since_start": t_use,
+            "time_since_last_event": d_use,
+            "type_event": int(m),
+        })
+    return seq
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pack_npz", required=True)
+    ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--eps", type=float, default=1e-8)
+    ap.add_argument("--time_mode", choices=["log_dt","raw_dt"], default="log_dt")
+    args = ap.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    pack = load_npz(args.pack_npz)
+
+    train = [build_seq(t, d, m, args.eps, args.time_mode)
+             for t, d, m in zip(pack["t_train"], pack["dt_train"], pack["mark_train"])]
+    dev   = [build_seq(t, d, m, args.eps, args.time_mode)
+             for t, d, m in zip(pack["t_val"], pack["dt_val"], pack["mark_val"])]
+    test  = [build_seq(t, d, m, args.eps, args.time_mode)
+             for t, d, m in zip(pack["t_test"], pack["dt_test"], pack["mark_test"])]
+
+    import pickle
+    for name, obj in [("train.pkl", train), ("dev.pkl", dev), ("test.pkl", test)]:
+        with open(os.path.join(args.out_dir, name), "wb") as f:
+            pickle.dump(obj, f)
+
+    dim_process = int(max(pack["mark_train"].max(), pack["mark_val"].max(), pack["mark_test"].max())) + 1
+    print(f"[OK] wrote Gatech pkls to: {args.out_dir}")
+    print(f"     dim_process = {dim_process} | lens(train/dev/test) = {len(train)} {len(dev)} {len(test)}")
+
+if __name__ == "__main__":
+    main()

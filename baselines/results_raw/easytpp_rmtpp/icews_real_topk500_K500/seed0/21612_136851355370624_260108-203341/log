@@ -1,0 +1,7 @@
+2026-01-08 20:33:41,196 - base_runner.py[pid:21612;line:176:save_log] - INFO: Save the log to baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/21612_136851355370624_260108-203341/log
+2026-01-08 20:33:41,720 - tpp_runner.py[pid:21612;line:60:_init_model] - INFO: Num of model parameters 99559
+2026-01-08 20:33:41,736 - tpp_runner.py[pid:21612;line:81:_load_model] - CRITICAL: Load model from baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/16571_125546498348160_260108-182622/models/saved_model
+2026-01-08 20:33:41,737 - base_runner.py[pid:21612;line:117:evaluate] - INFO: Data 'icews_real_topk500_K500' loaded...
+2026-01-08 20:33:41,737 - base_runner.py[pid:21612;line:122:evaluate] - INFO: Start RMTPP evaluation...
+2026-01-08 20:33:42,511 - tpp_runner.py[pid:21612;line:148:_evaluate_model] - CRITICAL: Evaluation result: loglike is -825.9537796188187, num_events is 546
+2026-01-08 20:33:42,512 - base_runner.py[pid:21612;line:128:evaluate] - INFO: End RMTPP evaluation! Cost time: 0.013m

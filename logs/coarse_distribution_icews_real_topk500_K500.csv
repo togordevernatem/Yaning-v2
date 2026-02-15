@@ -1,0 +1,7 @@
+split,coarse_id,coarse_name,count_total,count_seen,count_ood
+train,0,Other,682,682,0
+train,1,Protest,2818,2818,0
+val,0,Other,183,65,118
+val,1,Protest,567,342,225
+test,0,Other,178,64,114
+test,1,Protest,572,344,228

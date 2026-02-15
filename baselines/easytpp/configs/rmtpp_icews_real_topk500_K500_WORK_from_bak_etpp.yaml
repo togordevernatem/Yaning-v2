@@ -1,0 +1,31 @@
+pipeline_config_id: runner_config
+data:
+  icews_real_topk500_K500:
+    data_format: pkl
+    train_dir: baselines/easytpp/data/icews_real_topk500_K500_etpp/train.pkl
+    valid_dir: baselines/easytpp/data/icews_real_topk500_K500_etpp/dev.pkl
+    test_dir: baselines/easytpp/data/icews_real_topk500_K500_etpp/test.pkl
+    data_specs:
+      num_event_types: 2
+      pad_token_id: 2
+RMTPP_icews_real_topk500_K500:
+  base_config:
+    stage: train
+    backend: torch
+    dataset_id: icews_real_topk500_K500
+    runner_id: std_tpp
+    model_id: RMTPP
+    base_dir: baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0
+  model_config:
+    hidden_size: 32
+    time_emb_size: 16
+    num_layers: 2
+    dropout: 0.0
+  trainer_config:
+    seed: 0
+    gpu: 0
+    batch_size: 64
+    max_epoch: 1
+    optimizer: adam
+    learning_rate: 0.001
+    valid_freq: 1

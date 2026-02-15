@@ -1,0 +1,10 @@
+model,protocol,split,metric,mean,std,n_seeds
+gc_tpp_struct_typed,protB,all,TimeNLL,-16.98001551838201,0.04615789779278308,5
+gc_tpp_struct_typed,protB,all,logdt_RMSE,1.7634162286192199,0.05320778649299784,5
+gc_tpp_struct_typed,protB,all,logdt_MAE,0.8338621871971161,0.1484453004146923,5
+gc_tpp_struct_typed,protB,seen,TimeNLL,-17.211670462362857,0.050924594077858064,5
+gc_tpp_struct_typed,protB,seen,logdt_RMSE,0.7356013572749043,0.14290425317146935,5
+gc_tpp_struct_typed,protB,seen,logdt_MAE,0.6900361879607811,0.14969627671245744,5
+gc_tpp_struct_typed,protB,ood,TimeNLL,-16.651962226744622,0.03956693266479478,5
+gc_tpp_struct_typed,protB,ood,logdt_RMSE,2.5930714010690528,0.030072416125786577,5
+gc_tpp_struct_typed,protB,ood,logdt_MAE,1.0375383603092163,0.14696605397394485,5

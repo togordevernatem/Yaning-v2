@@ -3,16 +3,30 @@ from typing import Tuple, Dict
 import torch
 import pandas as pd
 
+from data.event_type_mapping import map_event_type_to_coarse, COARSE_LABELS
+
 
 class GC_TPP_Dataset:
     """
     统一管理 GC-TPP 用到的 toy / ICEWS 事件数据集。
 
-    支持四种 mode:
-      - "toy"                : data/events/toy_events.csv
-      - "icews_toy"          : data/events/icews_events_toy.csv
-      - "icews_real"         : data/events/icews_real.csv  （由 2010_2011_AllProtests 清洗而来）
-      - "icews_real_topk500" : 仅包含频次前 500 的事件（Top-K 数据）
+    支持多种 mode:
+      - "toy"                        : data/events/toy_events.csv
+      - "icews_toy"                  : data/events/icews_events_toy.csv
+      - "icews_real"                 : data/events/icews_real.csv  （由 2010_2011_AllProtests 清洗而来）
+      - "icews_real_topk500"         : 频次前 500 的事件（Top-K 数据，原始版本）
+      - "icews_real_topk500_K100"    : 在 icews_real_topk500 基础上按频次抽取 Top-100 子集
+      - "icews_real_topk500_K500"    : 在 icews_real_topk500 基础上按频次抽取 Top-500 子集
+      - "icews_real_topk500_K1000"   : 在 icews_real_topk500 基础上按频次抽取 Top-1000 子集
+
+    注意：后面三个 *_KXXX 模式依赖 tools/make_topk_subsets.py 预先生成的
+          icews_real_topk500_K100.csv 等文件。
+
+    ✅ 关键说明（本文件最重要的口径）：
+    - self.ev_type: 细粒度事件类型（CAMEO 整数 code）
+    - self.coarse_types: coarse 类型（Other / Protest / Violence / Diplomacy / Economic ...）
+    - Seen/OOD 的判定：按论文的 (i, j, c) —— 其中 c 必须是 coarse_type
+      所以 flags 使用 (src, dst, coarse_type) 三元组，而不是 (src, dst, ev_type)。
     """
 
     def __init__(
@@ -35,7 +49,7 @@ class GC_TPP_Dataset:
         self.device = device
         self.save_to_disk = save_to_disk
         self.mode = mode
-        # 对 icews_real 生效；对 icews_real_topk500 我们在对应 loader 里单独控制
+        # 对 icews_real 生效；对 icews_real_topk500 / *_KXXX 我们在对应 loader 里单独控制
         self.truncate_icews_real_to = truncate_icews_real_to
 
         os.makedirs(self.snapshots_dir, exist_ok=True)
@@ -47,10 +61,14 @@ class GC_TPP_Dataset:
         # 2) 构建或加载事件时间序列
         self.event_times, self.dt = self._build_or_load_events()
 
-        # 3) 构建或加载每条事件的 (src, dst, event_type)
+        # 3) 构建或加载每条事件的 (src, dst, ev_type)
         self.src, self.dst, self.ev_type = self._build_or_load_triplets()
 
-        # 4) Seen/OOD 标记（延迟生成）
+        # 4) 基于 fine 类型构建 coarse 类型
+        #    现在 self.ev_type 直接是 CAMEO 整数 code。
+        self.coarse_types = self._build_coarse_types()
+
+        # 5) Seen/OOD 标记（延迟生成）
         self._seen_ood_flags = None
 
     # =========================
@@ -84,7 +102,7 @@ class GC_TPP_Dataset:
         )
 
     # =========================
-    # Seen / OOD 标记
+    # Seen / OOD 标记（核心口径）
     # =========================
     def get_seen_ood_flags(
         self,
@@ -93,73 +111,26 @@ class GC_TPP_Dataset:
         idx_test: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
-        基于 (src, dst, ev_type) 三元组，生成 Train/Val/Test 的 Seen/OOD 标记。
+        ✅ Seen/OOD 判定口径（论文用）：
 
-        【与 dt / idx 的对齐关系（重点）】
-        ------------------------------------------------------------
-        - 在 get_train_val_test_split 中，我们对 event_times 和 dt 使用相同的
-          索引 idx_train / idx_val / idx_test：
-              ev_time_train = event_times[idx_train]
-              dt_train      = dt[idx_train]
-          因此：
-              len(dt_train) == len(idx_train)
-              len(dt_val)   == len(idx_val)
-              len(dt_test)  == len(idx_test)
+        基于 (src, dst, coarse_type) 三元组，生成 Train/Val/Test 的 Seen/OOD 标记。
 
-        - 本函数首先在“全体事件序列”上构造训练三元组集合：
-              train_triplets = { (src[i], dst[i], ev_type[i]) | i ∈ idx_train }
-
-        - 随后对每个 split 逐个索引 i ∈ idx_train / idx_val / idx_test，
-          针对该索引对应的三元组 (src[i], dst[i], ev_type[i]) 判断：
-              如果在 train_triplets 中出现过 → Seen
-              否则 → OOD
-
-          得到的 seen_train / seen_val / seen_test 与 ood_train / ood_val / ood_test
-          均为一维 BoolTensor，其长度与对应的 idx_* 完全一致：
-              len(seen_train) == len(idx_train) == len(dt_train)
-              len(seen_val)   == len(idx_val)   == len(dt_val)
-              len(seen_test)  == len(idx_test)  == len(dt_test)
-
-          也就是说：
-              seen_test[k] / ood_test[k] 与 dt_test[k]、
-              ev_time_test[k] 描述的是**同一段事件间隔/同一条事件**是否在 Train 中
-              以相同的 (src, dst, type) 形式出现过。
-
-        【Seen / OOD 定义】
-        ------------------------------------------------------------
-        - Seen 事件：其 (src, dst, type) 三元组在训练集 idx_train 中至少出现一次；
-        - OOD 事件：其三元组在训练集中从未出现，在 Val/Test 中是“新组合”。
-
-        返回
-        ----
-        flags : dict[str, torch.BoolTensor]
-            {
-              "seen_train": BoolTensor[len(idx_train)],
-              "seen_val"  : BoolTensor[len(idx_val)],
-              "seen_test" : BoolTensor[len(idx_test)],
-              "ood_train" : BoolTensor[len(idx_train)],
-              "ood_val"   : BoolTensor[len(idx_val)],
-              "ood_test"  : BoolTensor[len(idx_test)],
-            }
-
-        这些标记与 gc_tpp_continuous.py / gc_tpp_struct.py 中的
-        dt_train / dt_val / dt_test 在长度与顺序上一一对应，
-        可直接用来计算 Train/Val/Test 中 Seen 和 OOD 事件各自的
-        NLL / RMSE / MAE 指标（包括 Stage-5 / Stage-5+11 / Stage-11 等后续实验）。
+        - Seen: test 三元组 (i, j, c) 在训练集出现过
+        - OOD : test 三元组 (i, j, c) 在训练集从未出现过
         """
         if self._seen_ood_flags is not None:
             return self._seen_ood_flags
 
         device = self.device
 
-        # 1) 收集 train 三元组
+        # 1) 收集 train 三元组 (src, dst, coarse_type)
         train_triplets = set()
         for i in idx_train:
             i_int = int(i.item())
             trip = (
                 int(self.src[i_int].item()),
                 int(self.dst[i_int].item()),
-                int(self.ev_type[i_int].item()),
+                int(self.coarse_types[i_int].item()),   # ✅ 用 coarse_types
             )
             train_triplets.add(trip)
 
@@ -172,7 +143,7 @@ class GC_TPP_Dataset:
                 trip = (
                     int(self.src[i_int].item()),
                     int(self.dst[i_int].item()),
-                    int(self.ev_type[i_int].item()),
+                    int(self.coarse_types[i_int].item()),  # ✅ 用 coarse_types
                 )
                 if trip in train_triplets:
                     seen_flags.append(1)
@@ -206,58 +177,99 @@ class GC_TPP_Dataset:
         idx_test: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
-        提供标准化的三元组切分接口，仅用于 debug/typed-proxy。
-        返回 CPU LongTensor，避免显存占用。
+        提供标准化的三元组切分接口，仅用于 debug / typed-proxy。
+
+        - type_*：fine-grained CAMEO code（ev_type）
+        - coarse_*：coarse type id（coarse_types）
         """
         try:
             src_train = self.src[idx_train].cpu().long()
             dst_train = self.dst[idx_train].cpu().long()
             type_train = self.ev_type[idx_train].cpu().long()
+            coarse_train = self.coarse_types[idx_train].cpu().long()
 
             src_val = self.src[idx_val].cpu().long()
             dst_val = self.dst[idx_val].cpu().long()
             type_val = self.ev_type[idx_val].cpu().long()
+            coarse_val = self.coarse_types[idx_val].cpu().long()
 
             src_test = self.src[idx_test].cpu().long()
             dst_test = self.dst[idx_test].cpu().long()
             type_test = self.ev_type[idx_test].cpu().long()
+            coarse_test = self.coarse_types[idx_test].cpu().long()
 
             return {
-                "src_train": src_train, "dst_train": dst_train, "type_train": type_train,
-                "src_val":   src_val,   "dst_val":   dst_val,   "type_val":   type_val,
-                "src_test":  src_test,  "dst_test":  dst_test,  "type_test":  type_test,
+                "src_train": src_train, "dst_train": dst_train, "type_train": type_train, "coarse_train": coarse_train,
+                "src_val":   src_val,   "dst_val":   dst_val,   "type_val":   type_val,   "coarse_val":   coarse_val,
+                "src_test":  src_test,  "dst_test":  dst_test,  "type_test":  type_test,  "coarse_test":  coarse_test,
                 "reason": "ok",
             }
         except Exception as e:
             return {
-                "src_train": None, "dst_train": None, "type_train": None,
-                "src_val":   None, "dst_val":   None, "type_val":   None,
-                "src_test":  None, "dst_test":  None, "type_test":  None,
+                "src_train": None, "dst_train": None, "type_train": None, "coarse_train": None,
+                "src_val":   None, "dst_val":   None, "type_val":   None, "coarse_val":   None,
+                "src_test":  None, "dst_test":  None, "type_test":  None, "coarse_test":  None,
                 "reason": f"error: {e}",
             }
 
     # =========================
-    # 事件处理部分
+    # coarse 类型支持
+    # =========================
+    def _build_coarse_types(self) -> torch.Tensor:
+        """
+        使用 map_event_type_to_coarse 将 fine-grained 类型 self.ev_type
+        映射到 coarse 类型 ID。长度与 self.ev_type 相同。
+        现在 self.ev_type 直接是 CAMEO 整数 code。
+        """
+        coarse_list = [
+            map_event_type_to_coarse(int(t.item()))
+            for t in self.ev_type
+        ]
+        return torch.tensor(coarse_list, dtype=torch.long, device=self.device)
+
+    def get_event_coarse_types(self) -> torch.Tensor:
+        """
+        返回每条事件对应的 coarse 类型 ID，长度与 event_times / dt 一致。
+        """
+        return self.coarse_types
+
+    # =========================
+    # 事件处理部分（src, dst, ev_type）
     # =========================
     def _build_or_load_triplets(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         src_path, dst_path, type_path = self._triplets_pt_paths()
 
+        # Top-K 模式：直接从对应 CSV 重建，不走 .pt 缓存路径
         if self.mode == "icews_real_topk500":
             csv_path = os.path.join(self.events_dir, "icews_real_topk500.csv")
             return self._load_triplets_from_icews_csv(csv_path, time_col="time")
 
-        # 其他模式
+        if self.mode == "icews_real_topk500_K100":
+            csv_path = os.path.join(self.events_dir, "icews_real_topk500_K100.csv")
+            return self._load_triplets_from_icews_csv(csv_path, time_col="time")
+
+        if self.mode == "icews_real_topk500_K500":
+            csv_path = os.path.join(self.events_dir, "icews_real_topk500_K500.csv")
+            return self._load_triplets_from_icews_csv(csv_path, time_col="time")
+
+        if self.mode == "icews_real_topk500_K1000":
+            csv_path = os.path.join(self.events_dir, "icews_real_topk500_K1000.csv")
+            return self._load_triplets_from_icews_csv(csv_path, time_col="time")
+
+        # 其他模式：优先尝试从缓存 .pt 加载
         if os.path.exists(src_path) and os.path.exists(dst_path) and os.path.exists(type_path):
             src = torch.load(src_path, map_location=self.device)
             dst = torch.load(dst_path, map_location=self.device)
             ev_type = torch.load(type_path, map_location=self.device)
             return src.to(self.device), dst.to(self.device), ev_type.to(self.device)
 
+        # 否则根据 mode 从 CSV 构建
         if self.mode == "toy":
             src = torch.zeros(self.event_times.numel(), dtype=torch.long, device=self.device)
             dst = torch.zeros(self.event_times.numel(), dtype=torch.long, device=self.device)
             ev_type = torch.zeros(self.event_times.numel(), dtype=torch.long, device=self.device)
         elif self.mode in ["icews_toy", "icews_real"]:
+            # 注意：你仓库里目前是 icews_events_icews_real.csv / icews_events_icews_toy.csv 这一套命名
             csv_path = os.path.join(self.events_dir, f"icews_events_{self.mode}.csv")
             src, dst, ev_type = self._load_triplets_from_icews_csv(csv_path, time_col="time")
         else:
@@ -271,35 +283,53 @@ class GC_TPP_Dataset:
         return src, dst, ev_type
 
     def _load_triplets_from_icews_csv(self, csv_path: str, time_col: str = "time"):
+        """
+        从 ICEWS 类 CSV 中加载 (src, dst, event_type) 三元组。
+
+        关键点：
+        - src/dst 仍然重编号为 [0, num_entities)
+        - event_type 直接使用 CSV 中的 CAMEO 整数 code（不再重编号）
+        """
         df = pd.read_csv(csv_path)
         df = df.sort_values(time_col)
+
+        # 实体转为字符串以便重编号
         df["src"] = df["src"].astype(str)
         df["dst"] = df["dst"].astype(str)
-        df["event_type"] = df["event_type"].astype(str)
+
+        # 实体重编号
         all_entities = pd.unique(pd.concat([df["src"], df["dst"]], ignore_index=True))
         ent2id = {e: i for i, e in enumerate(all_entities.tolist())}
         src_ids = df["src"].map(ent2id).astype(int).to_numpy()
         dst_ids = df["dst"].map(ent2id).astype(int).to_numpy()
-        all_types = pd.unique(df["event_type"])
-        type2id = {t: i for i, t in enumerate(all_types.tolist())}
-        type_ids = df["event_type"].map(type2id).astype(int).to_numpy()
+
+        # 事件类型：直接使用 CAMEO 整数 code
+        df["event_type"] = df["event_type"].astype(int)
+        type_ids = df["event_type"].to_numpy()
+
         src = torch.tensor(src_ids, dtype=torch.long, device=self.device)
         dst = torch.tensor(dst_ids, dtype=torch.long, device=self.device)
         ev_type = torch.tensor(type_ids, dtype=torch.long, device=self.device)
         return src, dst, ev_type
 
     def _load_triplets_from_topk_csv(self, csv_path: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        （可选）从 Top-K 风格的 CSV 加载三元组。
+        这里假定 event_type 也是 CAMEO 整数 code。
+        """
         df = pd.read_csv(csv_path)
+        df = df.sort_values("time")
         df["src"] = df["src"].astype(str)
         df["dst"] = df["dst"].astype(str)
-        df["event_type"] = df["event_type"].astype(str)
+
         all_entities = pd.unique(pd.concat([df["src"], df["dst"]], ignore_index=True))
         ent2id = {e: i for i, e in enumerate(all_entities.tolist())}
         src_ids = df["src"].map(ent2id).astype(int).to_numpy()
         dst_ids = df["dst"].map(ent2id).astype(int).to_numpy()
-        all_types = pd.unique(df["event_type"])
-        type2id = {t: i for i, t in enumerate(all_types.tolist())}
-        type_ids = df["event_type"].map(type2id).astype(int).to_numpy()
+
+        df["event_type"] = df["event_type"].astype(int)
+        type_ids = df["event_type"].to_numpy()
+
         src = torch.tensor(src_ids, dtype=torch.long, device=self.device)
         dst = torch.tensor(dst_ids, dtype=torch.long, device=self.device)
         ev_type = torch.tensor(type_ids, dtype=torch.long, device=self.device)
@@ -354,11 +384,12 @@ class GC_TPP_Dataset:
         return X_list, edge_index
 
     # ===========================
-    # 事件时间部分
+    # 事件时间部分（event_times / dt）
     # ===========================
     def _build_or_load_events(self):
         ev_path, dt_path = self._events_pt_paths()
 
+        # 优先尝试从缓存加载
         if os.path.exists(ev_path) and os.path.exists(dt_path):
             event_times = torch.load(ev_path, map_location=self.device)
             dt = torch.load(dt_path, map_location=self.device)
@@ -382,6 +413,18 @@ class GC_TPP_Dataset:
         elif self.mode == "icews_real_topk500":
             csv_path = os.path.join(self.events_dir, "icews_real_topk500.csv")
             print(f"[GC_TPP_Dataset] Loading events (mode=icews_real_topk500) from CSV: {csv_path}")
+            event_times, dt = self._load_from_icews_real_topk500_csv(csv_path)
+        elif self.mode == "icews_real_topk500_K100":
+            csv_path = os.path.join(self.events_dir, "icews_real_topk500_K100.csv")
+            print(f"[GC_TPP_Dataset] Loading events (mode=icews_real_topk500_K100) from CSV: {csv_path}")
+            event_times, dt = self._load_from_icews_real_topk500_csv(csv_path)
+        elif self.mode == "icews_real_topk500_K500":
+            csv_path = os.path.join(self.events_dir, "icews_real_topk500_K500.csv")
+            print(f"[GC_TPP_Dataset] Loading events (mode=icews_real_topk500_K500) from CSV: {csv_path}")
+            event_times, dt = self._load_from_icews_real_topk500_csv(csv_path)
+        elif self.mode == "icews_real_topk500_K1000":
+            csv_path = os.path.join(self.events_dir, "icews_real_topk500_K1000.csv")
+            print(f"[GC_TPP_Dataset] Loading events (mode=icews_real_topk500_K1000) from CSV: {csv_path}")
             event_times, dt = self._load_from_icews_real_topk500_csv(csv_path)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
@@ -425,21 +468,39 @@ class GC_TPP_Dataset:
         return times, dt
 
     def _load_from_icews_real_topk500_csv(self, csv_path: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        从 icews_real_topk500 及其 Top-K 子集 CSV 中加载事件时间。
+        """
         df = pd.read_csv(csv_path)
         df = df.sort_values("time")
 
-        # 论文写作期：单独控制 topk500 的截断规模（Protocol-B 尝试）
-        max_events_debug = 8000  # 从 5000 调高到 8000，提高 triplet 重复率
-        if max_events_debug is not None and max_events_debug > 0:
-            if len(df) > max_events_debug:
-                df = df.iloc[: max_events_debug].copy()
-                print(f"[GC_TPP_Dataset] DEBUG truncate icews_real_topk500 to first {max_events_debug} events.")
+        basename = os.path.basename(csv_path)
+
+        if "K1000" in basename:
+            max_events_debug = 8000
+        elif "K500" in basename:
+            max_events_debug = 5000
+        elif "K100" in basename:
+            max_events_debug = 2000
+        else:
+            max_events_debug = 8000
+
+        if max_events_debug is not None and max_events_debug > 0 and len(df) > max_events_debug:
+            before = len(df)
+            df = df.iloc[: max_events_debug].copy()
+            print(
+                f"[GC_TPP_Dataset] DEBUG truncate {basename} "
+                f"to first {max_events_debug} events (original={before})."
+            )
 
         times = torch.tensor(df["time"].values, dtype=torch.float32, device=self.device)
         dt = self._compute_dt(times)
         return times, dt
 
     def _compute_dt(self, event_times: torch.Tensor) -> torch.Tensor:
+        """
+        将绝对时间序列 event_times 转为间隔序列 dt。
+        """
         dt = torch.zeros_like(event_times)
         if event_times.numel() > 0:
             dt[0] = event_times[0]
@@ -450,8 +511,8 @@ class GC_TPP_Dataset:
 
 # =============================
 # Optional convenience patch:
-# make GC_TPP_Dataset compatible with len(ds) / ds[i] for smoke tests.
-# This does NOT affect flags/splits/training.
+# 使 GC_TPP_Dataset 支持 len(ds) / ds[i]，便于快速 smoke test。
+# 不影响 flags / splits / training 逻辑。
 # =============================
 def _gctpp__len__(self):
     return int(getattr(self, "event_times").shape[0])
@@ -459,8 +520,8 @@ def _gctpp__len__(self):
 def _gctpp__getitem__(self, idx):
     return self.event_times[idx], self.dt[idx]
 
-# Only patch if the class itself didn't define them
 if "__len__" not in GC_TPP_Dataset.__dict__:
     GC_TPP_Dataset.__len__ = _gctpp__len__
 if "__getitem__" not in GC_TPP_Dataset.__dict__:
     GC_TPP_Dataset.__getitem__ = _gctpp__getitem__
+

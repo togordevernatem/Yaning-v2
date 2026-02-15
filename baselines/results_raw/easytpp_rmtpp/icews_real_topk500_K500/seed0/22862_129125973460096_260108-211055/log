@@ -1,0 +1,4 @@
+2026-01-08 21:10:55,974 - base_runner.py[pid:22862;line:176:save_log] - INFO: Save the log to baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/22862_129125973460096_260108-211055/log
+2026-01-08 21:10:56,441 - tpp_runner.py[pid:22862;line:60:_init_model] - INFO: Num of model parameters 99559
+2026-01-08 21:10:56,454 - tpp_runner.py[pid:22862;line:81:_load_model] - CRITICAL: Load model from baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/16571_125546498348160_260108-182622/models/saved_model
+2026-01-08 21:10:59,080 - tpp_runner.py[pid:22862;line:148:_evaluate_model] - CRITICAL: Evaluation result: loglike is -5169.9396030435555, num_events is 2801

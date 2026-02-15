@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "protocol": "protB",
+    "data_mode": "icews_real",
+    "model": "gc_tpp_struct_typed_base",
+    "seed": 4,
+    "timestamp": "20260103-181133"
+  },
+  "summary": {
+    "test": {
+      "all": {
+        "count": 749,
+        "time_nll": -16.993342408510014,
+        "logdt_rmse": 1.6887981339037506,
+        "logdt_mae": 0.5990997747840169,
+        "cov90": 0.0
+      },
+      "seen": {
+        "count": 439,
+        "time_nll": -17.23093801859028,
+        "logdt_rmse": 0.4937515633090626,
+        "logdt_mae": 0.442477339017364,
+        "cov90": 0.0
+      },
+      "ood": {
+        "count": 310,
+        "time_nll": -16.656876367138278,
+        "logdt_rmse": 2.55844788981455,
+        "logdt_mae": 0.8208973531761478,
+        "cov90": 0.0
+      }
+    }
+  },
+  "by_coarse_type_ood": [
+    {
+      "coarse_id": 0,
+      "coarse_type": "Other",
+      "count": 303,
+      "time_nll": -16.646380490595753,
+      "logdt_rmse": 2.5867181955074243,
+      "logdt_mae": 0.8289512769617263,
+      "cov90": 0.0
+    },
+    {
+      "coarse_id": 1,
+      "coarse_type": "Protest",
+      "count": 1,
+      "time_nll": -16.946264266967773,
+      "logdt_rmse": 0.47866099737953244,
+      "logdt_mae": 0.46629810333251953,
+      "cov90": 0.0
+    },
+    {
+      "coarse_id": 2,
+      "coarse_type": "Violence",
+      "count": 2,
+      "time_nll": -17.52785873413086,
+      "logdt_rmse": 0.5929475431205917,
+      "logdt_mae": 0.5440577566623688,
+      "cov90": 0.0
+    },
+    {
+      "coarse_id": 3,
+      "coarse_type": "Diplomacy",
+      "count": 2,
+      "time_nll": -16.944249153137207,
+      "logdt_rmse": 0.4530471373121644,
+      "logdt_mae": 0.43980617821216583,
+      "cov90": 0.0
+    },
+    {
+      "coarse_id": 4,
+      "coarse_type": "Economic",
+      "count": 2,
+      "time_nll": -16.943952560424805,
+      "logdt_rmse": 0.44933518269138967,
+      "logdt_mae": 0.43595829606056213,
+      "cov90": 0.0
+    }
+  ]
+}

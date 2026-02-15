@@ -12,6 +12,13 @@ GC-TPP Continuous core model (Stage-5 / Stage-5+ baseline)
 - 采用 Protocol-B Mixed split (在 data/dataset_toy.py 中实现)；
 - 显式区分 Test-全体 / Test-Seen / Test-OOD 的 NLL / RMSE / MAE；
 - 将训练 & 验证曲线以及测试指标保存到 logs/*.npz，供后续 Stage-6/10/11 分析。
+
+本文件已根据 S4.5 需求做扩展：
+- 在 Test 阶段额外记录逐事件（per-event）NLL：
+    nll_test_all : [N_test]
+    nll_test_seen: [N_seen_test]
+    nll_test_ood : [N_ood_test]
+- 这些数组同样被保存到 npz 中，供 tools/eval_topk_uncertainty.py 使用。
 """
 
 import os
@@ -308,6 +315,11 @@ def build_events_from_dataset_with_flags(
 def run_gc_tpp_continuous(data_mode: str = "toy"):
     """
     训练并评估 GC-TPP Core 模型的主入口。
+
+    新增（S4.5）：
+    -------------
+    - 在 Test 阶段计算逐事件 NLL，并在 npz 中以
+      nll_test_all / nll_test_seen / nll_test_ood 三个键保存。
     """
     set_seed(0)  # 固定随机种子，便于主实验复现
 
@@ -462,6 +474,12 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
     test_ae_sum_ood = 0.0
     test_count_ood = 0
 
+    # ===== 新增：逐事件 NLL / RMSE / MAE 向量，用于 S4.5 =====
+    nll_test_all_list = []   # 每个事件的 NLL
+    rmse_test_all_list = []  # 每个事件的 RMSE（log 空间）
+    mae_test_all_list = []   # 每个事件的 MAE（log 空间）
+    # ==========================================================
+
     seen_test = flags["seen_test"] if isinstance(flags, dict) and "seen_test" in flags else None
     ood_test = flags["ood_test"] if isinstance(flags, dict) and "ood_test" in flags else None
 
@@ -494,11 +512,18 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
             log_dt_pred = mu
             err_log = log_dt_pred - log_dt_true
 
+            # 全体统计（用于 S4 标量指标）
             test_se_sum += float(err_log ** 2)
             test_ae_sum += float(torch.abs(err_log))
             test_total_nll += float(nll.item())
             test_count += 1
 
+            # per-event 记录（用于 S4.5 不确定性分析）
+            nll_test_all_list.append(float(nll.item()))
+            rmse_test_all_list.append(float(torch.sqrt(err_log ** 2).item()))
+            mae_test_all_list.append(float(torch.abs(err_log).item()))
+
+            # Seen/OOD 细分
             ev_idx = i + 1
             is_seen = False
             is_ood = False
@@ -522,6 +547,7 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
     def _safe_mean(total, count):
         return total / count if count > 0 else float("nan")
 
+    # 标量指标（S4 保持不变）
     avg_test_nll = _safe_mean(test_total_nll, test_count)
     test_rmse = math.sqrt(_safe_mean(test_se_sum, test_count)) if test_count > 0 else float("nan")
     test_mae = _safe_mean(test_ae_sum, test_count)
@@ -546,6 +572,22 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
     print(f"[INFO] Test RMSE (log Δt, OOD)  = {test_rmse_ood:.4f} | count={test_count_ood}")
     print(f"[INFO] Test MAE  (log Δt, OOD)  = {test_mae_ood:.4f} | count={test_count_ood}")
 
+    # per-event 列表转为 numpy 数组
+    nll_test_all = np.array(nll_test_all_list, dtype=np.float32)   # [N_test_effective]
+    rmse_test_all = np.array(rmse_test_all_list, dtype=np.float32)
+    mae_test_all = np.array(mae_test_all_list, dtype=np.float32)
+
+    # 按 Seen/OOD 掩码切分 per-event NLL（与 test_count_seen/test_count_ood 一致）
+    if seen_test is not None and ood_test is not None:
+        seen_mask = seen_test.cpu().numpy().astype(bool)[1: 1 + len(nll_test_all)]
+        ood_mask = ood_test.cpu().numpy().astype(bool)[1: 1 + len(nll_test_all)]
+        nll_test_seen = nll_test_all[seen_mask]
+        nll_test_ood = nll_test_all[ood_mask]
+    else:
+        nll_test_seen = np.array([], dtype=np.float32)
+        nll_test_ood = np.array([], dtype=np.float32)
+
+    # 保存 npz
     os.makedirs("logs", exist_ok=True)
     if data_mode == "toy":
         save_path = "logs/gc_tpp_core_toy.npz"
@@ -574,6 +616,10 @@ def run_gc_tpp_continuous(data_mode: str = "toy"):
         test_mae_ood=test_mae_ood,
         test_count_ood=test_count_ood,
         best_val_nll=best_val_nll,
+        # ===== 新增三条：per-event NLL 向量 =====
+        nll_test_all=nll_test_all,
+        nll_test_seen=nll_test_seen,
+        nll_test_ood=nll_test_ood,
     )
     print(f"[INFO] Saved Core curves to {save_path}")
 

@@ -1,0 +1,39 @@
+import os, json, argparse, sys
+sys.path.insert(0, "baselines/easytpp/EasyTemporalPointProcess")
+
+from easy_tpp.config_factory import Config
+from easy_tpp.runner import Runner
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config_yaml", required=True, help="ORIGINAL pipeline yaml (the one you used for run_train.py)")
+    ap.add_argument("--experiment_id", required=True, help="same experiment_id as training, e.g. RMTPP_icews_real_topk500_K500")
+    ap.add_argument("--run_dir", required=True, help="existing run_dir that contains models/saved_model")
+    ap.add_argument("--split", default="test", choices=["train","dev","test"])
+    ap.add_argument("--out_json", default=None)
+    args = ap.parse_args()
+
+    # IMPORTANT: pass exp_id / experiment_id so EasyTPP can select the correct section in yaml
+    config = Config.build_from_yaml_file(
+        args.config_yaml,
+        exp_id=args.experiment_id,
+        experiment_id=args.experiment_id,
+    )
+
+    # IMPORTANT: force runner to use your existing run_dir (so it loads run_dir/models/saved_model)
+    runner = Runner.build_from_config(config, unique_model_dir=args.run_dir)
+
+    # load saved_model from run_dir/models/saved_model
+    runner._load_model()
+
+    metrics = runner.evaluate(split=args.split)
+
+    out_json = args.out_json or os.path.join(args.run_dir, f"eval_{args.split}.json")
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+
+    print("[OK] wrote:", out_json)
+    print("[METRICS]", metrics)
+
+if __name__ == "__main__":
+    main()

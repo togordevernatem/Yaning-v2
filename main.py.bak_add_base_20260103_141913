@@ -1,0 +1,108 @@
+import argparse
+
+from data.mode_registry import DATA_MODES
+from models.gc_tpp_continuous import run_gc_tpp_continuous
+from models.gc_tpp_struct import run_gc_tpp_struct
+from models.gc_tpp_struct_typed import run_gc_tpp_struct_typed
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="GC-TPP Temporal Toy / ICEWS Runner")
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gc_tpp_continuous",
+        choices=["gc_tpp_continuous", "gc_tpp_struct", "gc_tpp_struct_typed", "gc_tpp_struct_typed_base"],
+        help=(
+            "选择要运行的模型："
+            "gc_tpp_continuous（Core 连续版） / "
+            "gc_tpp_struct（Struct 结构版） / "
+            "gc_tpp_struct_typed（Struct-Typed + Profile 版） / gc_tpp_struct_typed_base（Struct-Typed 无 Profile）"
+        ),
+    )
+
+    parser.add_argument(
+        "--data_mode",
+        type=str,
+        default="toy",
+        choices=DATA_MODES,
+        help=(
+            "数据模式："
+            "toy / icews_real / icews_real_topk500 / "
+            "icews_real_topk500_K100 / icews_real_topk500_K500 / icews_real_topk500_K1000"
+        ),
+    )
+
+    # Table 1/2 自动落盘需要的三参数（目前只在 gc_tpp_struct_typed 里使用；其余模型不传参以免报错）
+    parser.add_argument("--seed", type=int, default=0, help="random seed for reproducibility")
+    parser.add_argument(
+        "--protocol",
+        type=str,
+        default="protB",
+        choices=["protA", "protB"],
+        help="evaluation protocol: protA (temporal split) or protB (mixed split)",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="logs/table_runs",
+        help="directory where metrics.json will be saved for Table1/Table2 aggregation",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    if args.model == "gc_tpp_continuous":
+        print("============================================================")
+        print("[INFO] Selected model: gc_tpp_continuous (Core)")
+        print(f"[INFO] Data mode: {args.data_mode}")
+        print("============================================================")
+        # 注意：continuous/struct 版本目前还没接 metrics.json，所以不要传 seed/protocol/out_dir（否则会参数不匹配报错）
+        run_gc_tpp_continuous(data_mode=args.data_mode)
+
+    elif args.model == "gc_tpp_struct":
+        print("============================================================")
+        print("[INFO] Selected model: gc_tpp_struct (Struct)")
+        print(f"[INFO] Data mode: {args.data_mode}")
+        print("============================================================")
+        run_gc_tpp_struct(data_mode=args.data_mode)
+
+    elif args.model == "gc_tpp_struct_typed":
+        print("============================================================")
+        print("[INFO] Selected model: gc_tpp_struct_typed (Struct-Typed + Profile)")
+        print(f"[INFO] Data mode: {args.data_mode}")
+        print(f"[INFO] Seed: {args.seed} | Protocol: {args.protocol} | Out dir: {args.out_dir}")
+        print("============================================================")
+        run_gc_tpp_struct_typed(
+            data_mode=args.data_mode,
+            seed=args.seed,
+            protocol=args.protocol,
+            out_dir=args.out_dir,
+        )
+
+    elif args.model == "gc_tpp_struct_typed_base":
+        print("============================================================")
+        print(f"[INFO] Selected model: gc_tpp_struct_typed_base (Struct-Typed, NO Profile)")
+        print(f"[INFO] Data mode: {args.data_mode}")
+        print(f"[INFO] Seed: {args.seed} | Protocol: {args.protocol} | Out dir: {args.out_dir}")
+        print("============================================================")
+        run_gc_tpp_struct_typed(
+            data_mode=args.data_mode,
+            seed=args.seed,
+            protocol=args.protocol,
+            out_dir=args.out_dir,
+            enable_profile=False,
+            model_name="gc_tpp_struct_typed_base",
+        )
+
+    else:
+        raise ValueError(f"Unknown model: {args.model}")
+
+
+if __name__ == "__main__":
+    main()
+

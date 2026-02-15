@@ -1,0 +1,28 @@
+{
+  "time_mode": "dt",
+  "eps": 1e-08,
+  "flat_mode": {
+    "train": true,
+    "val": true,
+    "test": true
+  },
+  "keys": {
+    "dt": [
+      "dt_train",
+      "dt_val",
+      "dt_test"
+    ],
+    "mark": [
+      "mark_train",
+      "mark_val",
+      "mark_test"
+    ]
+  },
+  "lens": {
+    "train": 3500,
+    "dev": 750,
+    "test": 750,
+    "len_train0": 1,
+    "len_test0": 1
+  }
+}

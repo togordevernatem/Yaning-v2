@@ -1,0 +1,8 @@
+pipeline_config_id: runner_config
+
+data:
+  icews_real_topk500_K500:
+    data_format: pkl
+    train_dir: baselines/easytpp/data/icews_real_topk500_K500_etpp/train.pkl
+    valid_dir: baselines/easytpp/data/icews_real_topk500_K500_etpp/dev.pkl
+    test_dir:  baselines/easytpp/data/icews_real_topk500_K500_etpp/test.pkl

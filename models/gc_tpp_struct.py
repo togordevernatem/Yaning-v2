@@ -1,3 +1,4 @@
+# models/gc_tpp_struct.py
 """
 GC-TPP Struct model (Stage-5+11 early)
 
@@ -68,7 +69,7 @@ class GCTPPStruct(nn.Module):
         dt_history:  (L_hist,)
         """
         g_t, H_all = self.graph_encoder(X_snapshots, edge_index, return_node_repr=True)
-        H_last = H_all[-1]  # (N, hidden_dim)
+        H_last = H_all[-1]  # (N, graph_hidden_dim)
 
         h_t = self.time_encoder(dt_history)  # (time_hidden_dim,)
         h_rep = h_t.unsqueeze(0).expand(H_last.size(0), -1)  # (N, time_hidden_dim)
@@ -80,7 +81,8 @@ class GCTPPStruct(nn.Module):
         log_sigma_nodes = out[:, 1]
 
         lambda_nodes = torch.exp(mu_nodes + 0.5 * torch.exp(2 * log_sigma_nodes))
-        return mu_nodes, log_sigma_nodes, lambda_nodes
+        # 额外返回 H_last，供 Typed‑proxy 使用
+        return mu_nodes, log_sigma_nodes, lambda_nodes, H_last
 
 
 # ===========================
@@ -259,7 +261,7 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
             dt_history = dt_train[start_idx: i + 1]
             dt_next = dt_train[i + 1]
 
-            mu_nodes, log_sigma_nodes, lambda_nodes = model(X_snapshots, edge_index, dt_history)
+            mu_nodes, log_sigma_nodes, lambda_nodes, _ = model(X_snapshots, edge_index, dt_history)
 
             nll_nodes = lognormal_nll(dt_next, mu_nodes, log_sigma_nodes)
             nll = nll_nodes.mean()
@@ -302,7 +304,7 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
                 dt_history = dt_val[start_idx: i + 1]
                 dt_next = dt_val[i + 1]
 
-                mu_nodes, log_sigma_nodes, lambda_nodes = model(X_snapshots, edge_index, dt_history)
+                mu_nodes, log_sigma_nodes, lambda_nodes, _ = model(X_snapshots, edge_index, dt_history)
 
                 nll_nodes = lognormal_nll(dt_next, mu_nodes, log_sigma_nodes)
                 nll = nll_nodes.mean()
@@ -388,7 +390,7 @@ def run_gc_tpp_struct(data_mode: str = "toy"):
             dt_history = dt_test[start_idx: i + 1]
             dt_next = dt_test[i + 1]
 
-            mu_nodes, log_sigma_nodes, lambda_nodes = model(X_snapshots, edge_index, dt_history)
+            mu_nodes, log_sigma_nodes, lambda_nodes, _ = model(X_snapshots, edge_index, dt_history)
 
             nll_nodes = lognormal_nll(dt_next, mu_nodes, log_sigma_nodes)
             nll = nll_nodes.mean()

@@ -1,0 +1,14 @@
+{
+  "data_mode": "icews_real_topk500_K500",
+  "train_ratio": 0.7,
+  "val_ratio": 0.15,
+  "truncate": 5000,
+  "sizes": {
+    "train": 3500,
+    "val": 750,
+    "test": 750,
+    "test_seen": 422,
+    "test_ood": 328
+  },
+  "note": "Baseline pack exported from GC_TPP_Dataset splits + coarse marks."
+}

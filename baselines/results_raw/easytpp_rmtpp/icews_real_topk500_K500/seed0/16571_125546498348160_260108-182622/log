@@ -1,0 +1,9 @@
+2026-01-08 18:26:22,871 - base_runner.py[pid:16571;line:176:save_log] - INFO: Save the log to baselines/results_raw/easytpp_rmtpp/icews_real_topk500_K500/seed0/16571_125546498348160_260108-182622/log
+2026-01-08 18:26:23,288 - tpp_runner.py[pid:16571;line:60:_init_model] - INFO: Num of model parameters 99559
+2026-01-08 18:26:23,289 - base_runner.py[pid:16571;line:98:train] - INFO: Data 'icews_real_topk500_K500' loaded...
+2026-01-08 18:26:23,289 - base_runner.py[pid:16571;line:103:train] - INFO: Start RMTPP training...
+2026-01-08 18:26:26,998 - tpp_runner.py[pid:16571;line:96:_train_model] - INFO: [ Epoch 0 (train) ]: train loglike is -6013.183712290253, num_events is 2801
+2026-01-08 18:26:27,569 - tpp_runner.py[pid:16571;line:107:_train_model] - INFO: [ Epoch 0 (valid) ]:  valid loglike is -825.9537796188187, num_events is 546
+2026-01-08 18:26:28,144 - tpp_runner.py[pid:16571;line:122:_train_model] - INFO: [ Epoch 0 (test) ]: test loglike is -437.72802989130435, num_events is 575
+2026-01-08 18:26:28,145 - tpp_runner.py[pid:16571;line:124:_train_model] - CRITICAL: current best loglike on valid set is -825.9538 (updated at epoch-0), best updated at this epoch
+2026-01-08 18:26:28,145 - base_runner.py[pid:16571;line:110:train] - INFO: End RMTPP train! Cost time: 0.081m

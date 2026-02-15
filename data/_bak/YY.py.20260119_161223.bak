@@ -1,0 +1,352 @@
+cd ~/Projects/gctpp_temporal_toy
+
+# 1) 备份旧文件
+mkdir -p data/_bak
+cp -f data/YY.py data/_bak/YY.py.$(date +%Y%m%d_%H%M%S).bak
+
+# 2) 覆盖写入“完整无截断”的 v4 代码（dpi=600 更高清）
+cat > data/YY.py <<'PY'
+from graphviz import Digraph
+
+def create_dimvp_pp_xingkong_full_v4(C: int = 20, d: int = 64):
+    """
+    Stage-7.5 'Xingkong' FULL V4
+
+    Fixes:
+      1) Prior λ̂ edge no longer pierces View B:
+         - Use native endpoint ports: 'LLM_Agent:e' -> 'PriorTap' -> 'View_B:w'
+         - Slightly increase minlen/weight to encourage boundary-entering routing
+      2) NLL Loss circle slightly larger:
+         - width/height: 1.35
+      3) Higher resolution:
+         - dpi: 600
+    """
+
+    # 1) Canvas
+    dot = Digraph("DIMVP_PP_Xingkong_Full_V4", comment="DIMVP++ Stage-7.5 Full V4")
+    dot.attr(rankdir="LR", splines="ortho", charset="UTF-8", dpi="600")
+
+    # Global style
+    dot.attr(
+        "node",
+        shape="box",
+        style="rounded,filled",
+        fontname="Helvetica",
+        fontsize="12",
+        margin="0.15,0.10",
+    )
+    dot.attr("edge", fontname="Helvetica", fontsize="10", color="#555555", arrowsize="0.7")
+
+    # Palette
+    colors = {
+        "infra_bg": "#E1F5FE",
+        "infra_node": "#B3E5FC",
+        "phase1_bg": "#FFF3E0",
+        "view_a": "#C8E6C9",
+        "view_b": "#FFE0B2",
+        "view_c_border": "#BA68C8",
+        "llm_node": "#F8BBD0",
+        "profile": "#FFECB3",
+        "phase2_bg": "#E0F2F1",
+        "phase2_node": "#B2DFDB",
+        "core_node": "#80CBC4",
+        "loss": "#FFCDD2",
+    }
+
+    # Helpers
+    def escape_html(text: str) -> str:
+        if not text:
+            return ""
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+    def html(title: str, sub: str, detail: str = "") -> str:
+        title, sub, detail = escape_html(title), escape_html(sub), escape_html(detail)
+        txt = f"""<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
+          <TR><TD><B>{title}</B></TD></TR>
+          <TR><TD><FONT POINT-SIZE="10">{sub}</FONT></TD></TR>"""
+        if detail:
+            txt += f"""<TR><TD><FONT POINT-SIZE="8" COLOR="#444444"><I>{detail}</I></FONT></TD></TR>"""
+        txt += "</TABLE>>"
+        return txt
+
+    # ============================================================
+    # Area 1: Data Infrastructure
+    # ============================================================
+    with dot.subgraph(name="cluster_0_infra") as c:
+        c.attr(label="Data Infrastructure", style="filled", color=colors["infra_bg"], fontcolor="#01579B")
+        c.node(
+            "Dataset",
+            html("ICEWS Dataset", "2005–2015", "Full Event Stream"),
+            fillcolor=colors["infra_node"],
+            color="#0288D1",
+        )
+        c.node(
+            "Split",
+            html("Strict Split", "Train / Val / Test", "No Leakage"),
+            fillcolor=colors["infra_node"],
+            color="#0288D1",
+        )
+        c.edge("Dataset", "Split")
+
+    # ============================================================
+    # Area 2: Phase 1 (Offline DIMVP++)
+    # ============================================================
+    with dot.subgraph(name="cluster_1_offline") as c:
+        c.attr(
+            label="Phase 1: Offline DIMVP++ Construction (Train-Only)",
+            style="filled",
+            color=colors["phase1_bg"],
+            fontcolor="#E65100",
+        )
+
+        # LLM Agent
+        c.node(
+            "LLM_Agent",
+            html(
+                "LLM Agent (Frozen)",
+                "Optional Prior/Compression (not Oracle)",
+                "Temp=0; Fixed Prompt; Cached",
+            ),
+            fillcolor=colors["llm_node"],
+            style="dashed,filled",
+            color="#C2185B",
+        )
+
+        # View A
+        c.node(
+            "View_A",
+            html("View A: Anchor", "Decadal Stats (Dirichlet)", f"vA_u ∈ R^{C}"),
+            fillcolor=colors["view_a"],
+            color="#2E7D32",
+        )
+
+        # View B
+        c.node(
+            "View_B",
+            html(
+                "View B: Momentum",
+                "Learnable Decay λ (per-type)",
+                f"vB_u(t) ∈ R^{C} | post-smooth w/ A | B-init & B-prior",
+            ),
+            fillcolor=colors["view_b"],
+            color="#EF6C00",
+        )
+
+        # View C (explicit dashed box)
+        with c.subgraph(name="cluster_view_c_explicit") as sub_c:
+            sub_c.attr(
+                label="View C: Semantic",
+                style="dashed",
+                color=colors["view_c_border"],
+                fontcolor="#7B1FA2",
+                margin="16",
+            )
+
+            sub_c.node(
+                "Codebook",
+                html(
+                    "Public Codebook",
+                    "def(c) only; E[c]=φ(def(c))",
+                    "A-weighted mix  m_u = sum_c vA_u[c] * E[c]",
+                ),
+                fillcolor="#F3E5F5",
+                color="#7B1FA2",
+                width="1.25",
+            )
+
+            sub_c.node(
+                "Summary",
+                html("Controlled Summary", "Train-only templates T_u^tr", "No ext facts; Cached"),
+                fillcolor="#F3E5F5",
+                color="#7B1FA2",
+                width="1.25",
+            )
+
+            sub_c.node(
+                "Open_Enc",
+                html("Open Encoder (Frozen)", "SBERT / MiniLM", f"vC_u ∈ R^{d} (fixed vectors)"),
+                fillcolor="#CE93D8",
+                color="#7B1FA2",
+            )
+
+            sub_c.edge("Codebook", "Open_Enc", style="solid")
+            sub_c.edge("Summary", "Open_Enc", style="solid")
+
+        # Static Profile P
+        Dp = 2 * C + d
+        c.node(
+            "Static_P",
+            html(
+                "Static Profile Matrix P",
+                "Concat [A || B || C]",
+                f"P ∈ R^{{N×{Dp}}}  (node-level lookup)",
+            ),
+            fillcolor=colors["profile"],
+            shape="component",
+            color="#F57F17",
+            penwidth="2",
+        )
+
+        # --- PRIOR LABEL PIN FIX (Stable Port Routing) ---
+        c.node(
+            "PriorTap",
+            label="",
+            shape="point",
+            width="0.01",
+            height="0.01",
+            style="invis",
+        )
+
+        c.edge(
+            "LLM_Agent:e",
+            "PriorTap",
+            label="Prior λ̂",
+            fontsize="10",
+            fontcolor="#C2185B",
+            style="dotted",
+            color="#C2185B",
+            decorate="true",
+            constraint="false",
+            minlen="2",
+            weight="2",
+        )
+
+        c.edge(
+            "PriorTap",
+            "View_B:w",
+            style="dotted",
+            color="#C2185B",
+            constraint="false",
+            minlen="2",
+            weight="2",
+        )
+
+        # Summarize
+        c.edge(
+            "LLM_Agent:e",
+            "Summary:w",
+            label="Summarize",
+            fontsize="9",
+            fontcolor="#C2185B",
+            style="dotted",
+            color="#C2185B",
+            minlen="2",
+        )
+
+        # A & B -> P
+        c.edge("View_A", "Static_P")
+        c.edge("View_B", "Static_P")
+
+        # Encoder -> P
+        c.edge("Open_Enc", "Static_P", xlabel="Project / Fuse", minlen="2")
+
+    # ============================================================
+    # Area 3: Phase 2 (Online SE-GC-TPP)
+    # ============================================================
+    with dot.subgraph(name="cluster_2_online") as c:
+        c.attr(label="Phase 2: Online SE-GC-TPP Modeling", style="filled", color=colors["phase2_bg"], fontcolor="#00695C")
+
+        c.node("Graph", html("Graph Snapshot", "G(t)", "Dynamic Edges"), fillcolor="#FFFFFF", color="#00695C")
+
+        c.node(
+            "Inject",
+            html("Feature Injection", "P_u = Lookup(P, u)", "Concat [X_t || P_u]"),
+            shape="diamond",
+            fillcolor="#80DEEA",
+            color="#0097A7",
+            penwidth="2",
+        )
+
+        c.node("GConv", html("GConvGRU", "Dynamic Encoder", "History h_u(t)"), fillcolor=colors["core_node"], color="#004D40")
+        c.node("TimeEnc", html("Time Encoder", "Δt embedding", "Sinusoidal"), fillcolor=colors["phase2_node"], color="#00695C")
+        c.node("Fusion", html("Fusion MLP", "Integration", "z(t)"), fillcolor=colors["core_node"], color="#004D40")
+        c.node("Dist", html("TPP Head", "LogNormal", "Output: (μ, log σ)"), fillcolor="#A5D6A7", color="#1B5E20")
+
+        c.edge("Graph", "Inject")
+        c.edge("Inject", "GConv")
+        c.edge("GConv", "Fusion")
+        c.edge("TimeEnc", "Fusion")
+        c.edge("Fusion", "Dist")
+
+    # ============================================================
+    # Area 4: Prediction & Opt
+    # ============================================================
+    with dot.subgraph(name="cluster_3_eval") as c:
+        c.attr(label="Prediction & Opt", style="dashed", color="#BDBDBD")
+
+        c.node(
+            "Loss",
+            html("NLL Loss", "Optimization", "-log p(Δt) + Reg Loss"),
+            shape="circle",
+            fillcolor=colors["loss"],
+            color="#C62828",
+            fixedsize="true",
+            width="1.35",
+            height="1.35",
+            fontsize="10",
+        )
+
+        c.node(
+            "Metric",
+            html("High-Stakes Eval", "OOD / Macro-F1", "High-Stakes"),
+            fillcolor="#FFF9C4",
+            color="#FBC02D",
+        )
+
+    # ============================================================
+    # Cross-Cluster Connections
+    # ============================================================
+    dot.edge("Split", "View_A", color="#90A4AE")
+    dot.edge("Split", "View_B", color="#90A4AE")
+    dot.edge("Split", "Summary", xlabel="Template Seq", color="#90A4AE", minlen="2")
+    dot.edge("Split", "GConv", xlabel="Stream", color="#555555", minlen="3")
+
+    dot.edge(
+        "Static_P",
+        "Inject",
+        label="Static Lookup",
+        fontsize="11",
+        color="#F57F17",
+        penwidth="2.5",
+        fontcolor="#E65100",
+        minlen="2",
+    )
+
+    dot.edge("Dist", "Loss")
+    dot.edge("Dist", "Metric")
+
+    dot.edge("Loss", "Fusion", style="dotted", color="#D32F2F", dir="back")
+    dot.edge(
+        "Loss",
+        "View_B",
+        xlabel="Update λ (train)",
+        style="dotted",
+        color="#D32F2F",
+        dir="back",
+        constraint="false",
+        minlen="3",
+    )
+
+    out_name = "dimvp_pp_xingkong_full_v4"
+    dot.render(out_name, format="png", cleanup=True)
+    print(f"[OK] Generated: {out_name}.png")
+
+
+if __name__ == "__main__":
+    create_dimvp_pp_xingkong_full_v4()
+PY
+
+# 3) 语法检查（你偏好的必做）
+python -m py_compile data/YY.py
+
+# 4) 运行生成图
+python data/YY.py
+
+# 5) 打开图片
+xdg-open dimvp_pp_xingkong_full_v4.png

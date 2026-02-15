@@ -1,0 +1,389 @@
+import os
+import math
+import argparse
+import numpy as np
+import torch
+
+from data.dataset_toy import GC_TPP_Dataset
+from models.gc_tpp_continuous import lognormal_nll, set_seed
+from models.gru_lognormal_baseline import GRULogNormalBaseline
+
+
+def _safe_mean(total, count):
+    return total / count if count > 0 else float("nan")
+
+
+def sort_indices_by_event_time(idx: torch.Tensor, event_times: torch.Tensor) -> torch.Tensor:
+    """
+    Sort indices by event time robustly even if tensors are on different devices.
+    """
+    idx_device = idx.device
+    idx_cpu = idx.detach().to("cpu")
+    et_cpu = event_times.detach().to("cpu")
+    t = et_cpu[idx_cpu]
+    order = torch.argsort(t)
+    return idx_cpu[order].to(idx_device)
+
+
+def sanity_print_and_check(ds: GC_TPP_Dataset, idx_train, idx_val, idx_test, flags: dict):
+    print("[SANITY] flags.keys() =", list(flags.keys()))
+
+    if ("seen_test" not in flags) or ("ood_test" not in flags):
+        raise KeyError(f"flags must contain 'seen_test' and 'ood_test', got keys={list(flags.keys())}")
+
+    seen_mask = flags["seen_test"]
+    ood_mask = flags["ood_test"]
+
+    print("[SANITY] seen_mask.shape =", tuple(seen_mask.shape))
+    print("[SANITY] ood_mask.shape  =", tuple(ood_mask.shape))
+
+    # IMPORTANT: In your dataset implementation, seen_test/ood_test are SPLIT-LOCAL masks.
+    # Their length equals len(idx_test), not the global number of events.
+    expected_test_len = int(idx_test.numel())
+    if seen_mask.numel() != expected_test_len:
+        raise RuntimeError(f"seen_mask length {seen_mask.numel()} != len(idx_test) {expected_test_len}")
+    if ood_mask.numel() != expected_test_len:
+        raise RuntimeError(f"ood_mask length {ood_mask.numel()} != len(idx_test) {expected_test_len}")
+
+    # ---- split ordering check (CPU check) ----
+    def _is_non_decreasing(x):
+        return bool(torch.all(x[1:] >= x[:-1]).item()) if x.numel() > 1 else True
+
+    t_train = ds.event_times.detach().to("cpu")[idx_train.detach().to("cpu")]
+    t_val = ds.event_times.detach().to("cpu")[idx_val.detach().to("cpu")]
+    t_test = ds.event_times.detach().to("cpu")[idx_test.detach().to("cpu")]
+
+    print("[SANITY] train time non-decreasing =", _is_non_decreasing(t_train))
+    print("[SANITY] val   time non-decreasing =", _is_non_decreasing(t_val))
+    print("[SANITY] test  time non-decreasing =", _is_non_decreasing(t_test))
+
+    if not _is_non_decreasing(t_train):
+        raise RuntimeError("train split not time-sorted")
+    if not _is_non_decreasing(t_val):
+        raise RuntimeError("val split not time-sorted")
+    if not _is_non_decreasing(t_test):
+        raise RuntimeError("test split not time-sorted")
+
+    # ---- seen/ood counts sanity (LOCAL mask index i+1) ----
+    seen_cnt = 0
+    ood_cnt = 0
+    for i in range(expected_test_len - 1):
+        local_next = i + 1
+        if bool(seen_mask[local_next].item()):
+            seen_cnt += 1
+        if bool(ood_mask[local_next].item()):
+            ood_cnt += 1
+    print(f"[SANITY] test next-event count: total={expected_test_len-1}, seen={seen_cnt}, ood={ood_cnt}")
+
+
+def run(
+    mode: str,
+    seed: int,
+    max_history_len: int,
+    num_epochs: int,
+    lr: float,
+    snapshots_dir: str,
+    events_dir: str,
+    truncate_icews_real_to: int,
+    save_to_disk: bool,
+    train_ratio: float,
+    val_ratio: float,
+):
+    set_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if train_ratio <= 0 or val_ratio < 0 or train_ratio + val_ratio >= 1:
+        raise ValueError(
+            f"Invalid split ratios: train_ratio={train_ratio}, val_ratio={val_ratio}. "
+            "Require train_ratio>0, val_ratio>=0, train_ratio+val_ratio<1."
+        )
+
+    # -----------------------
+    # infer T, N, F_in from snapshot files (x_0.pt stores dict {"x": Tensor, "edge_index": Tensor})
+    # -----------------------
+    x_files = sorted([f for f in os.listdir(snapshots_dir) if f.startswith("x_") and f.endswith(".pt")])
+    if len(x_files) == 0:
+        raise RuntimeError(f"No x_*.pt found in {snapshots_dir}; cannot infer T,N,F_in.")
+    T = len(x_files)
+
+    x0_path = os.path.join(snapshots_dir, "x_0.pt")
+    x0_obj = torch.load(x0_path, map_location="cpu")
+    if not isinstance(x0_obj, dict) or "x" not in x0_obj:
+        raise RuntimeError(
+            f"Expected {x0_path} to be dict with key 'x'. "
+            f"keys={list(x0_obj.keys()) if isinstance(x0_obj, dict) else None}"
+        )
+
+    x0 = x0_obj["x"]
+    if not isinstance(x0, torch.Tensor) or x0.dim() != 2:
+        raise RuntimeError(f"Expected x_0.pt['x'] to be a 2D Tensor (N,F), got {type(x0)} shape={getattr(x0,'shape',None)}")
+
+    N = int(x0.shape[0])
+    F_in = int(x0.shape[1])
+
+    print(f"[INFO] inferred snapshot config from {x0_path}: T={T}, N={N}, F_in={F_in}")
+    print(f"[INFO] dataset mode={mode}, events_dir={events_dir}, snapshots_dir={snapshots_dir}")
+
+    # -----------------------
+    # load dataset
+    # -----------------------
+    ds = GC_TPP_Dataset(
+        snapshots_dir=snapshots_dir,
+        events_dir=events_dir,
+        T=T,
+        N=N,
+        F_in=F_in,
+        device=device,
+        save_to_disk=save_to_disk,
+        mode=mode,
+        truncate_icews_real_to=truncate_icews_real_to,
+    )
+
+    # split (global indices)
+    (idx_train, idx_val, idx_test,
+     _ev_time_train, _ev_time_val, _ev_time_test,
+     _dt_train, _dt_val, _dt_test) = ds.get_train_val_test_split(train_ratio=train_ratio, val_ratio=val_ratio)
+
+    # IMPORTANT: enforce time order for sequence model
+    idx_train = sort_indices_by_event_time(idx_train, ds.event_times)
+    idx_val = sort_indices_by_event_time(idx_val, ds.event_times)
+    idx_test = sort_indices_by_event_time(idx_test, ds.event_times)
+
+    # seen/ood flags (split-local masks for test)
+    flags = ds.get_seen_ood_flags(idx_train, idx_val, idx_test)
+    sanity_print_and_check(ds, idx_train, idx_val, idx_test, flags)
+
+    # ---- alignment meta (next-event counts) ----
+    seen_mask_cpu = flags["seen_test"].detach().to("cpu")
+    ood_mask_cpu = flags["ood_test"].detach().to("cpu")
+    n_test_next_event = max(int(idx_test.numel()) - 1, 0)
+    seen_next_event_count = int(seen_mask_cpu[1:].sum().item()) if n_test_next_event > 0 else 0
+    ood_next_event_count = int(ood_mask_cpu[1:].sum().item()) if n_test_next_event > 0 else 0
+
+    # global arrays (index by global event id)
+    src_global = ds.src
+    dst_global = ds.dst
+    coarse_global = ds.coarse_types
+    dt_global = ds.dt
+
+    # infer embedding sizes for baseline (based on actual ids in event stream)
+    max_node_id = int(torch.max(torch.cat([src_global, dst_global])).item())
+    num_nodes = max_node_id + 1
+    num_coarse_types = int(torch.max(coarse_global).item()) + 1
+
+    model = GRULogNormalBaseline(
+        num_nodes=num_nodes,
+        num_coarse_types=num_coarse_types,
+        node_emb_dim=32,
+        type_emb_dim=16,
+        dt_emb_dim=16,
+        hidden_dim=64,
+        num_layers=1,
+        dropout=0.1,
+    ).to(device)
+
+    optim = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+
+    # -----------------------
+    # Train
+    # -----------------------
+    model.train()
+    for epoch in range(1, num_epochs + 1):
+        total_nll = 0.0
+        se_sum = 0.0
+        ae_sum = 0.0
+        count = 0
+
+        for i in range(idx_train.numel() - 1):
+            optim.zero_grad()
+
+            start = max(0, i - max_history_len + 1)
+            g_hist = idx_train[start:i + 1]
+            g_next = idx_train[i + 1]
+
+            src_seq = src_global[g_hist].long()
+            dst_seq = dst_global[g_hist].long()
+            typ_seq = coarse_global[g_hist].long()
+
+            dt_hist = dt_global[g_hist]
+            dt_next = dt_global[g_next]
+
+            log_dt_seq = torch.log(torch.clamp(dt_hist, min=1e-8))
+            log_dt_true = torch.log(torch.clamp(dt_next, min=1e-8))
+
+            mu, log_sigma = model(src_seq, dst_seq, typ_seq, log_dt_seq)
+
+            nll = lognormal_nll(dt_next, mu, log_sigma)
+            err = mu - log_dt_true
+
+            nll.backward()
+            optim.step()
+
+            total_nll += float(nll.item())
+            se_sum += float((err ** 2).item())
+            ae_sum += float(torch.abs(err).item())
+            count += 1
+
+        train_nll = _safe_mean(total_nll, count)
+        train_rmse = math.sqrt(_safe_mean(se_sum, count))
+        train_mae = _safe_mean(ae_sum, count)
+
+        print(
+            f"Epoch {epoch:02d} | GRU-LogNormal({mode}) seed={seed} "
+            f"Train NLL={train_nll:.4f} RMSE(logΔt)={train_rmse:.4f} MAE(logΔt)={train_mae:.4f}"
+        )
+
+    # -----------------------
+    # Test (All / Seen / OOD) with LOCAL masks
+    # -----------------------
+    def eval_test():
+        model.eval()
+        seen_mask = flags["seen_test"]
+        ood_mask = flags["ood_test"]
+
+        total_nll = 0.0
+        se_sum = 0.0
+        ae_sum = 0.0
+        count = 0
+
+        total_nll_seen = 0.0
+        se_sum_seen = 0.0
+        ae_sum_seen = 0.0
+        count_seen = 0
+
+        total_nll_ood = 0.0
+        se_sum_ood = 0.0
+        ae_sum_ood = 0.0
+        count_ood = 0
+
+        with torch.no_grad():
+            for i in range(idx_test.numel() - 1):
+                start = max(0, i - max_history_len + 1)
+                g_hist = idx_test[start:i + 1]
+                g_next = idx_test[i + 1]
+
+                src_seq = src_global[g_hist].long()
+                dst_seq = dst_global[g_hist].long()
+                typ_seq = coarse_global[g_hist].long()
+
+                dt_hist = dt_global[g_hist]
+                dt_next = dt_global[g_next]
+
+                log_dt_seq = torch.log(torch.clamp(dt_hist, min=1e-8))
+                log_dt_true = torch.log(torch.clamp(dt_next, min=1e-8))
+
+                mu, log_sigma = model(src_seq, dst_seq, typ_seq, log_dt_seq)
+
+                nll = lognormal_nll(dt_next, mu, log_sigma)
+                err = mu - log_dt_true
+
+                se = float((err ** 2).item())
+                ae = float(torch.abs(err).item())
+
+                total_nll += float(nll.item())
+                se_sum += se
+                ae_sum += ae
+                count += 1
+
+                # IMPORTANT: use test-local index (i+1) to index seen/ood masks
+                local_next = i + 1
+                is_seen = bool(seen_mask[local_next].item())
+                is_ood = bool(ood_mask[local_next].item())
+
+                if is_seen:
+                    total_nll_seen += float(nll.item())
+                    se_sum_seen += se
+                    ae_sum_seen += ae
+                    count_seen += 1
+                if is_ood:
+                    total_nll_ood += float(nll.item())
+                    se_sum_ood += se
+                    ae_sum_ood += ae
+                    count_ood += 1
+
+        return {
+            "test_nll": _safe_mean(total_nll, count),
+            "test_rmse": math.sqrt(_safe_mean(se_sum, count)),
+            "test_mae": _safe_mean(ae_sum, count),
+
+            "test_nll_seen": _safe_mean(total_nll_seen, count_seen),
+            "test_rmse_seen": math.sqrt(_safe_mean(se_sum_seen, count_seen)),
+            "test_mae_seen": _safe_mean(ae_sum_seen, count_seen),
+
+            "test_nll_ood": _safe_mean(total_nll_ood, count_ood),
+            "test_rmse_ood": math.sqrt(_safe_mean(se_sum_ood, count_ood)),
+            "test_mae_ood": _safe_mean(ae_sum_ood, count_ood),
+
+            "test_seen_sum": int(count_seen),
+            "test_ood_sum": int(count_ood),
+            "seed": int(seed),
+
+            "mode": mode,
+            "T": int(T),
+            "N": int(N),
+            "F_in": int(F_in),
+            "max_history_len": int(max_history_len),
+            "epochs": int(num_epochs),
+            "lr": float(lr),
+        }
+
+    test_metrics = eval_test()
+    print("[TEST]", test_metrics)
+
+    os.makedirs("logs", exist_ok=True)
+    out_path = os.path.join("logs", f"gru_lognormal_{mode}_seed{seed}.npz")
+
+    # Persist alignment metadata for apples-to-apples comparison.
+    np.savez(
+        out_path,
+        **test_metrics,
+        n_total=int(ds.dt.numel()),
+        n_train=int(idx_train.numel()),
+        n_val=int(idx_val.numel()),
+        n_test=int(idx_test.numel()),
+        n_test_next_event=int(n_test_next_event),
+        seen_next_event_count=int(seen_next_event_count),
+        ood_next_event_count=int(ood_next_event_count),
+        train_ratio=float(train_ratio),
+        val_ratio=float(val_ratio),
+    )
+    print(f"[INFO] saved: {out_path}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", default="icews_real_topk500_K500")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--max_history_len", type=int, default=64)
+    ap.add_argument("--epochs", type=int, default=15)
+    ap.add_argument("--lr", type=float, default=1e-3)
+
+    # Must match Ours if you want aligned comparisons.
+    ap.add_argument("--train_ratio", type=float, default=0.7)
+    ap.add_argument("--val_ratio", type=float, default=0.15)
+
+    ap.add_argument("--snapshots_dir", default="data/snapshots")
+    ap.add_argument("--events_dir", default="data/events")
+    ap.add_argument("--truncate_icews_real_to", type=int, default=5000)
+
+    ap.add_argument("--no_save_to_disk", action="store_true")
+    args = ap.parse_args()
+    save_to_disk = (not args.no_save_to_disk)
+
+    run(
+        mode=args.mode,
+        seed=args.seed,
+        max_history_len=args.max_history_len,
+        num_epochs=args.epochs,
+        lr=args.lr,
+        snapshots_dir=args.snapshots_dir,
+        events_dir=args.events_dir,
+        truncate_icews_real_to=args.truncate_icews_real_to,
+        save_to_disk=save_to_disk,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+    )
+
+
+if __name__ == "__main__":
+    main()
