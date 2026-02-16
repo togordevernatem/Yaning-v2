@@ -4,6 +4,7 @@ from models.gc_tpp_continuous import run_gc_tpp_continuous
 from models.gc_tpp_struct import run_gc_tpp_struct
 from models.gc_tpp_struct_typed import run_gc_tpp_struct_typed
 from models.gc_tpp_struct_typed_base import run_gc_tpp_struct_typed_base
+from data.mode_registry import DATA_MODES
 
 
 def main():
@@ -32,15 +33,8 @@ def main():
         "--data_mode",
         type=str,
         default="toy",
-        choices=[
-            "toy",
-            "icews_real",
-            "icews_real_topk500",
-            "icews_real_topk500_K100",
-            "icews_real_topk500_K500",
-            "icews_real_topk500_K1000",
-        ],
-        help="数据模式：toy / icews_real / icews_real_topk500 / icews_real_topk500_K100 / icews_real_topk500_K500 / icews_real_topk500_K1000",
+        choices=DATA_MODES,
+        help="数据模式（见 data/mode_registry.py::DATA_MODES）",
     )
 
     parser.add_argument("--seed", type=int, default=0, help="random seed for reproducibility")

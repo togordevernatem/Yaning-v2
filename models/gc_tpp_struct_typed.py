@@ -124,7 +124,7 @@ class GCTPPStructTyped(nn.Module):
 # 2. 主流程：Profile-Augmented Struct-Typed（无残差）
 # ===========================
 def run_gc_tpp_struct_typed(
-    data_mode: str = "icews_real_topk500_K500",
+    data_mode: str = "icews0515",
     seed: int = 0,
     protocol: str = "protB",
     out_dir: str = "logs/table_runs",
@@ -463,7 +463,7 @@ def run_gc_tpp_struct_typed(
 
     # ---------- 保存 per-coarse 指标 CSV ----------
     os.makedirs("logs", exist_ok=True)
-    coarse_csv_path = f"logs/gc_tpp_struct_typed_profile_coarse_{data_mode}.csv"
+    coarse_csv_path = f"logs/gc_tpp_struct_typed_profile_{data_mode}.csv"
     with open(coarse_csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(

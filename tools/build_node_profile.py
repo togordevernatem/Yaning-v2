@@ -9,7 +9,7 @@ from models.gc_tpp_continuous import set_seed
 
 
 def build_node_profile(
-    data_mode: str = "icews_real_topk500_K500",
+    data_mode: str = "icews0515",
     T_snap: int = 20,
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
@@ -96,5 +96,24 @@ def build_node_profile(
     print(f"[Profile] Saved node_profile to {out_path} with shape {node_profile_np.shape}")
 
 
+def _parse_args():
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Build node coarse profile from TRAIN split only")
+    ap.add_argument("--data_mode", type=str, default="icews0515")
+    ap.add_argument("--T_snap", type=int, default=20)
+    ap.add_argument("--train_ratio", type=float, default=0.7)
+    ap.add_argument("--val_ratio", type=float, default=0.15)
+    ap.add_argument("--save_dir", type=str, default="./data")
+    return ap.parse_args()
+
+
 if __name__ == "__main__":
-    build_node_profile()
+    args = _parse_args()
+    build_node_profile(
+        data_mode=args.data_mode,
+        T_snap=args.T_snap,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        save_dir=args.save_dir,
+    )

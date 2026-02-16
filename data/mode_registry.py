@@ -13,4 +13,6 @@ DATA_MODES = [
     "icews_real_topk500_K100",
     "icews_real_topk500_K500",
     "icews_real_topk500_K1000",
+    # New: TKG-style ICEWS0515 dataset under data/events/icews0515
+    "icews0515",
 ]

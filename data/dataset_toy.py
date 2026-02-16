@@ -4,6 +4,7 @@ import torch
 import pandas as pd
 
 from data.event_type_mapping import map_event_type_to_coarse, COARSE_LABELS
+from data.icews0515_loader import load_icews0515_txt_dir
 
 
 class GC_TPP_Dataset:
@@ -18,6 +19,7 @@ class GC_TPP_Dataset:
       - "icews_real_topk500_K100"    : 在 icews_real_topk500 基础上按频次抽取 Top-100 子集
       - "icews_real_topk500_K500"    : 在 icews_real_topk500 基础上按频次抽取 Top-500 子集
       - "icews_real_topk500_K1000"   : 在 icews_real_topk500 基础上按频次抽取 Top-1000 子集
+      - "icews0515"                  : 从 data/events/icews0515/*.txt 读取事件时间与三元组
 
     注意：后面三个 *_KXXX 模式依赖 tools/make_topk_subsets.py 预先生成的
           icews_real_topk500_K100.csv 等文件。
@@ -216,11 +218,18 @@ class GC_TPP_Dataset:
     # coarse 类型支持
     # =========================
     def _build_coarse_types(self) -> torch.Tensor:
+        """基于 fine 类型构建 coarse 类型。
+
+        说明：
+        - 旧 ICEWS CSV 路线里 fine type 是 CAMEO 整数 code，可以映射 coarse。
+        - icews0515 的 fine type 是 relation 的重编号（0..R-1），无法直接用 CAMEO 映射。
+          为了让现有 pipeline 不炸，这里把所有事件都归到 coarse=0（Other）。
+          后续如果你有 relation->CAMEO 或 relation->coarse 的映射表，再改这里即可。
         """
-        使用 map_event_type_to_coarse 将 fine-grained 类型 self.ev_type
-        映射到 coarse 类型 ID。长度与 self.ev_type 相同。
-        现在 self.ev_type 直接是 CAMEO 整数 code。
-        """
+
+        if self.mode == "icews0515":
+            return torch.zeros_like(self.ev_type, dtype=torch.long, device=self.device)
+
         coarse_list = [
             map_event_type_to_coarse(int(t.item()))
             for t in self.ev_type
@@ -238,6 +247,16 @@ class GC_TPP_Dataset:
     # =========================
     def _build_or_load_triplets(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         src_path, dst_path, type_path = self._triplets_pt_paths()
+
+        # New: icews0515 从 txt 直接加载 (src, dst, ev_type)
+        if self.mode == "icews0515":
+            data = load_icews0515_txt_dir(
+                dir_path=os.path.join(self.events_dir, "icews0515"),
+                device=self.device,
+                split="facts",
+                time_mode="index",
+            )
+            return data.src, data.dst, data.ev_type
 
         # Top-K 模式：直接从对应 CSV 重建，不走 .pt 缓存路径
         if self.mode == "icews_real_topk500":
@@ -386,7 +405,9 @@ class GC_TPP_Dataset:
     # ===========================
     # 事件时间部分（event_times / dt）
     # ===========================
-    def _build_or_load_events(self):
+    def _build_or_load_events(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """构建或加载事件时间序列 event_times 和 dt。"""
+
         ev_path, dt_path = self._events_pt_paths()
 
         # 优先尝试从缓存加载
@@ -426,6 +447,14 @@ class GC_TPP_Dataset:
             csv_path = os.path.join(self.events_dir, "icews_real_topk500_K1000.csv")
             print(f"[GC_TPP_Dataset] Loading events (mode=icews_real_topk500_K1000) from CSV: {csv_path}")
             event_times, dt = self._load_from_icews_real_topk500_csv(csv_path)
+        elif self.mode == "icews0515":
+            data = load_icews0515_txt_dir(
+                dir_path=os.path.join(self.events_dir, "icews0515"),
+                device=self.device,
+                split="facts",
+                time_mode="index",
+            )
+            return data.event_times, data.dt
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
@@ -524,4 +553,3 @@ if "__len__" not in GC_TPP_Dataset.__dict__:
     GC_TPP_Dataset.__len__ = _gctpp__len__
 if "__getitem__" not in GC_TPP_Dataset.__dict__:
     GC_TPP_Dataset.__getitem__ = _gctpp__getitem__
-

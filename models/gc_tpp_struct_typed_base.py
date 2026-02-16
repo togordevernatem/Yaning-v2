@@ -124,7 +124,7 @@ class GCTPPStructTyped(nn.Module):
 # 2. 主流程：Profile-Augmented Struct-Typed（无残差）
 # ===========================
 def run_gc_tpp_struct_typed_base(
-    data_mode: str = "icews_real_topk500_K500",
+    data_mode: str = "icews0515",
     seed: int = 0,
     protocol: str = "protB",
     out_dir: str = "logs/table_runs",

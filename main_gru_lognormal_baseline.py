@@ -352,7 +352,7 @@ def run(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", default="icews_real_topk500_K500")
+    ap.add_argument("--mode", default="icews0515")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max_history_len", type=int, default=64)
     ap.add_argument("--epochs", type=int, default=15)
