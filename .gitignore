@@ -16,5 +16,4 @@ env/
 *.pt
 *.csv
 logs/
-data/events/
 baselines/results_raw/
